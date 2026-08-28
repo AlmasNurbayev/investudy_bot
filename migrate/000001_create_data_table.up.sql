@@ -1,30 +1,30 @@
-CREATE TABLE divisions (
+CREATE TABLE IF NOT EXISTS divisions (
     id   SERIAL PRIMARY KEY,
     name TEXT UNIQUE NOT NULL
 );
 
-CREATE TABLE items (
+CREATE TABLE IF NOT EXISTS items (
     id   SERIAL PRIMARY KEY,
     name TEXT UNIQUE NOT NULL
 );
 
-CREATE TABLE sub_items (
+CREATE TABLE IF NOT EXISTS sub_items (
     id      SERIAL PRIMARY KEY,
     name    TEXT UNIQUE NOT NULL,
     item_id INT REFERENCES items(id)
 );
 
-CREATE TABLE fin_types (
+CREATE TABLE IF NOT EXISTS fin_types (
     id   SERIAL PRIMARY KEY,
     name TEXT UNIQUE NOT NULL
 );
 
-CREATE TABLE vids (
+CREATE TABLE IF NOT EXISTS vids (
     id   SERIAL PRIMARY KEY,
     name TEXT UNIQUE NOT NULL
 );
 
-CREATE TABLE data (
+CREATE TABLE IF NOT EXISTS data (
     id           BIGSERIAL PRIMARY KEY,
     date         DATE,
     num_oper     TEXT,

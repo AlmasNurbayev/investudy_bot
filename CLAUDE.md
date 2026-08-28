@@ -6,9 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Telegram bot providing financial information to users. Data flows from Google Sheets → PostgreSQL → Telegram bot (Go).
 
-Two separate components:
-- **parser/** — Go service that pulls data from Google Sheets and writes it to PostgreSQL
-- **bot/** — Go Telegram bot that reads from PostgreSQL and serves user queries
+Three separate binaries:
+- **cmd/parser/** — сервис загрузки данных из Google Sheets в PostgreSQL
+- **cmd/bot/** — Telegram-бот, читает из PostgreSQL
+- **cmd/migrator/** — запускает миграции БД (golang-migrate), используется при деплое до старта остальных сервисов
 
 ## Architecture
 
@@ -69,40 +70,7 @@ make lint         # golangci-lint run ./...
 
 ## Deploy (Docker)
 
-Оба бинарника собираются в **один образ** через многоэтапный `Dockerfile`:
-
-```dockerfile
-# stage 1 — сборка
-FROM golang:1.23-alpine AS builder
-WORKDIR /app
-COPY . .
-RUN go build -o /bin/bot    ./bot/cmd/...
-RUN go build -o /bin/parser ./parser/cmd/...
-
-# stage 2 — финальный образ
-FROM alpine:3.20
-COPY --from=builder /bin/bot    /bin/bot
-COPY --from=builder /bin/parser /bin/parser
-```
-
-Запуск в продуктиве через `docker-compose.yml` — оба сервиса используют один образ, но разные `command`:
-
-```yaml
-services:
-  bot:
-    image: investudy_bot
-    command: /bin/bot
-    env_file: .env
-
-  parser:
-    image: investudy_bot
-    command: /bin/parser
-    env_file: .env
-
-  postgres:
-    image: postgres:16-alpine
-    env_file: .env
-```
+Все три бинарника (`bot`, `parser`, `migrator`) собираются в один образ — см. `Dockerfile`. Продуктивный запуск через `docker-compose.yml`; `bot` и `parser` зависят от `migrator` (`service_completed_successfully`).
 
 ```bash
 docker compose up -d        # поднять в продуктиве
