@@ -1,0 +1,68 @@
+name: investudy
+
+services:
+  postgres:
+    image: postgres:18.6-alpine
+    restart: unless-stopped
+
+    # Единый .env в корне репозитория (см. CLAUDE.md). Образу нужны POSTGRES_DB,
+    # POSTGRES_USER и POSTGRES_PASSWORD — они там уже есть.
+    env_file:
+      - ../.env
+
+    # Порт публикуется только на loopback: база нужна парсеру, который пока
+    # запускается на хосте, но снаружи она быть доступна не должна.
+    # Когда парсер и бот переедут в этот compose, публикацию можно убрать —
+    # они найдут базу по имени сервиса во внутренней сети.
+    #
+    # Порт задан числом, а не через ${POSTGRES_PORT}: интерполяция в compose
+    # читает .env из каталога этого файла (deploy/), а не корневой — env_file
+    # выше задаёт переменные только внутри контейнера. Подстановка молча
+    # свалилась бы в дефолт. Менять порт — здесь, синхронно с POSTGRES_PORT в .env.
+    ports:
+      - "127.0.0.1:5432:5432"
+
+    # Файлы базы лежат в _volume_db в корне репозитория (папка в .gitignore).
+    #
+    # ВНИМАНИЕ: в Postgres 18 каталог данных переехал.
+    #   17.x — PGDATA=/var/lib/postgresql/data, VOLUME /var/lib/postgresql/data
+    #   18.x — PGDATA=/var/lib/postgresql/18/docker, VOLUME /var/lib/postgresql
+    # Привычный по старым примерам монтаж на .../data в 18-й версии попадёт мимо
+    # PGDATA, и данные уедут в анонимный том, то есть потеряются при пересоздании.
+    # Внутри _volume_db данные окажутся в подкаталоге 18/docker.
+    volumes:
+      - ../_volume_db:/var/lib/postgresql
+      - ./pg_conf/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+
+    # Свой конфиг вместо сгенерированного initdb. ALTER SYSTEM пишет
+    # в postgresql.auto.conf внутри PGDATA, так что :ro выше ничего не ломает.
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
+
+    # $$ экранирует подстановку compose: переменные берутся из окружения
+    # контейнера, а не интерполируются на этапе разбора файла.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+    # Postgres при остановке пишет контрольную точку; десяти секунд по умолчанию
+    # может не хватить, а kill -9 обернётся восстановлением при следующем старте.
+    stop_grace_period: 1m
+
+    # Общая память по умолчанию — 64 МБ, этого мало параллельным запросам
+    # и объёмным сортировкам.
+    shm_size: 256mb
+
+# Отдельного сервиса-мигратора здесь нет: схему накатывает сам сервис при старте
+# цепочкой в CMD образа (`/app/migrator -typeTask up && exec /app/parser`),
+# поэтому мигратор гарантированно отрабатывает раньше и без depends_on.
+#
+# Когда сюда приедут бот или API, им понадобится перекрыть адрес БД — в .env
+# POSTGRES_HOST=localhost верен для запуска на хосте, а изнутри сети compose
+# база доступна по имени сервиса:
+#     environment:
+#       POSTGRES_HOST: postgres
+#       POSTGRES_PORT: 5432
+# environment имеет приоритет над env_file, так что правки .env не потребуются.

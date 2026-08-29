@@ -7,6 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Telegram bot providing financial information to users. Data flows from Google Sheets → PostgreSQL → Telegram bot (Go).
 
 Three separate binaries:
+
 - **cmd/parser/** — сервис загрузки данных из Google Sheets в PostgreSQL
 - **cmd/bot/** — Telegram-бот, читает из PostgreSQL
 - **cmd/migrator/** — запускает миграции БД (golang-migrate), используется при деплое до старта остальных сервисов
@@ -30,29 +31,35 @@ Telegram users
 ```
 
 ### parser/
+
 Fetches spreadsheet data on a schedule (cron or ticker), transforms rows into domain structs, upserts into PostgreSQL. Credentials via Google service account JSON (path in env).
 
 ### bot/
+
 Telegram bot на `github.com/go-telegram/bot`. Регистрация хендлеров через `bot.RegisterHandler`, запуск через `b.Start(ctx)`. Обрабатывает команды пользователей, читает из PostgreSQL, отправляет ответы. Stateless — всё состояние в БД.
 
 ### Database
+
 Драйвер — `pgx` (`github.com/jackc/pgx/v5`). Миграции — `golang-migrate/migrate` с pgx-драйвером. Файлы миграций в `migrate/` в формате `000001_name.up.sql` / `000001_name.down.sql`.
+Миграции должны быть идемпотентными - их многократный запуск не должен портить данные.
+
+**Таблица `data` версионируется еженедельными снепшотами — перед написанием любых запросов к ней читать [docs/data-versioning.md](docs/data-versioning.md).** Кратко: у каждой строки есть `snapshot_id` → `snapshots(id)`, поэтому запрос без фильтра по версии вернёт все срезы разом и задвоит суммы. Читающий код (бот) обращается только к вью `data_current`; произвольную версию (веб-отчёт, сравнение периодов) берут из `data` с явным `snapshot_id`.
 
 ## Environment Variables
 
 Все переменные хранятся в едином `.env` в корне репозитория и загружаются обоими сервисами.
 
-| Variable | Description |
-|---|---|
-| `SPREADSHEET_ID` | ID документа Google Sheets |
-| `SHEET_NAME` | Название листа (например, `ДДС`) |
-| `GOOGLE_CREDENTIALS_FILE` | Путь к service account JSON |
-| `POSTGRES_HOST` | Хост PostgreSQL |
-| `POSTGRES_PORT` | Порт PostgreSQL |
-| `POSTGRES_DB` | Имя базы данных |
-| `POSTGRES_USER` | Пользователь |
-| `POSTGRES_PASSWORD` | Пароль |
-| `TELEGRAM_BOT_TOKEN` | Токен от @BotFather |
+| Variable                  | Description                      |
+| ------------------------- | -------------------------------- |
+| `SPREADSHEET_ID`          | ID документа Google Sheets       |
+| `SHEET_NAME`              | Название листа (например, `ДДС`) |
+| `GOOGLE_CREDENTIALS_FILE` | Путь к service account JSON      |
+| `POSTGRES_HOST`           | Хост PostgreSQL                  |
+| `POSTGRES_PORT`           | Порт PostgreSQL                  |
+| `POSTGRES_DB`             | Имя базы данных                  |
+| `POSTGRES_USER`           | Пользователь                     |
+| `POSTGRES_PASSWORD`       | Пароль                           |
+| `TELEGRAM_BOT_TOKEN`      | Токен от @BotFather              |
 
 ## Development (make)
 
@@ -105,36 +112,40 @@ investudy_bot/
 
 Лист **ДДС** (движение денежных средств) — банковские транзакции. 24 колонки:
 
-| Поле (англ.) | Русское название | Тип / формат |
-|---|---|---|
-| `date` | Дата | `DD.MM.YYYY` |
-| `numOper` | # | строка |
-| `typeOper` | Тип | строка |
-| `debetVal` | Дебет валюта | decimal |
-| `creditVal` | Кредит валюта | decimal |
-| `exRate` | Курс | decimal |
-| `debet` | Дебет | decimal, запятая как разделитель; исключает `credit` |
-| `credit` | Кредит | decimal, запятая как разделитель; исключает `debet` |
-| `sender` | Бенеф-р/отправитель | контрагент + ИИН/БИН |
-| `description` | Назначение платежа | свободный текст |
-| `bank` | Банк | короткое имя (`Kaspi`, `Halyk`, …) |
-| `period` | Период | `01.MM.YYYY` — первое число месяца |
-| `organization` | Организация | юр. лицо (`Aligee`) |
-| `division_id` | Подразделение | FK → `divisions(id)` |
-| `item_id` | Статья | FK → `items(id)` |
-| `sub_item_id` | Подстатья | FK → `sub_items(id)` (sub_items.item_id → items) |
-| `comment1` | Учет | |
-| `comment2` | Комментарий | |
-| `fin_type_id` | Тип | FK → `fin_types(id)` (`доход` / `расход` / `возврат` и др.) |
-| `sumDash` | СуммаДаш | decimal |
-| `vid_id` | Вид | FK → `vids(id)` (центр затрат) |
-| `sumRevenue` | СуммаДоход | decimal; заполнен только для `type=доход` |
-| `sumCost` | СуммаРасход | decimal; заполнен только для `type=расход` |
-| `sumReturn` | СуммаВозврат | decimal; заполнен только для `type=возврат` |
+| Поле (англ.)   | Русское название    | Тип / формат                                                |
+| -------------- | ------------------- | ----------------------------------------------------------- |
+| `date`         | Дата                | `DD.MM.YYYY`                                                |
+| `numOper`      | #                   | строка                                                      |
+| `typeOper`     | Тип                 | строка                                                      |
+| `debetVal`     | Дебет валюта        | decimal                                                     |
+| `creditVal`    | Кредит валюта       | decimal                                                     |
+| `exRate`       | Курс                | decimal                                                     |
+| `debet`        | Дебет               | decimal, запятая как разделитель; исключает `credit`        |
+| `credit`       | Кредит              | decimal, запятая как разделитель; исключает `debet`         |
+| `sender`       | Бенеф-р/отправитель | контрагент + ИИН/БИН                                        |
+| `description`  | Назначение платежа  | свободный текст                                             |
+| `bank`         | Банк                | короткое имя (`Kaspi`, `Halyk`, …)                          |
+| `period`       | Период              | `01.MM.YYYY` — первое число месяца                          |
+| `organization` | Организация         | юр. лицо (`Aligee`)                                         |
+| `division_id`  | Подразделение       | FK → `divisions(id)`                                        |
+| `item_id`      | Статья              | FK → `items(id)`                                            |
+| `sub_item_id`  | Подстатья           | FK → `sub_items(id)` (sub_items.item_id → items)            |
+| `comment1`     | Учет                |                                                             |
+| `comment2`     | Комментарий         |                                                             |
+| `fin_type_id`  | Тип                 | FK → `fin_types(id)` (`доход` / `расход` / `возврат` и др.) |
+| `sumDash`      | СуммаДаш            | decimal                                                     |
+| `vid_id`       | Вид                 | FK → `vids(id)` (центр затрат)                              |
+| `sumRevenue`   | СуммаДоход          | decimal; заполнен только для `type=доход`                   |
+| `sumCost`      | СуммаРасход         | decimal; заполнен только для `type=расход`                  |
+| `sumReturn`    | СуммаВозврат        | decimal; заполнен только для `type=возврат`                 |
 
-**Справочные таблицы:** `divisions`, `items`, `sub_items`, `fin_types`, `vids` — все FK nullable. Парсер делает `INSERT … ON CONFLICT(name) DO NOTHING RETURNING id` перед вставкой в `data`. Для `sub_items` сначала upsert родительского `item`, затем `sub_item` с `item_id`.
+**Справочные таблицы:** `divisions`, `items`, `sub_items`, `fin_types`, `vids` — все FK nullable. Парсер апсертит значение по имени и получает id перед вставкой в `data`. Для `sub_items` сначала upsert родительского `item`, затем `sub_item` с `item_id`.
+
+Апсерт пишется как `INSERT … ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id`, а **не** через `DO NOTHING RETURNING id`: последний на конфликте не возвращает ни одной строки, то есть для уже существующего значения id не придёт. Строк в справочниках десятки, лишняя запись роли не играет.
 
 Особенности парсинга:
+
+- **Действительность строки определяется полем `date`.** Строки с пустой датой (разделители, итоговые, хвост листа) отбрасываются до разбора остальных колонок — в них может лежать что угодно, и попытка их прочитать завалила бы весь синк.
 - `debet`/`credit` — взаимоисключающие: в строке заполнено только одно.
 - `sumRevenue`, `sumCost`, `sumReturn` — только одно ненулевое на строку в зависимости от `type`.
 - Числа в формате `46829,00` — при парсинге заменять `,` → `.` перед `strconv.ParseFloat`.

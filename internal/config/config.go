@@ -2,62 +2,90 @@ package config
 
 import (
 	"fmt"
-	"os"
+	"net"
+	"net/url"
 	"time"
+
+	"github.com/caarlos0/env/v11"
 )
 
 type Config struct {
 	Sheets   SheetsConfig
 	Postgres PostgresConfig
+	Parser   ParserConfig
 }
 
 type SheetsConfig struct {
-	SpreadsheetID string
-	SheetName     string
+	SpreadsheetID   string `env:"SPREADSHEET_ID,required,notEmpty"`
+	SheetName       string `env:"SHEET_NAME,required,notEmpty"`
+	CredentialsFile string `env:"GOOGLE_CREDENTIALS_FILE,required,notEmpty"`
 }
 
 type PostgresConfig struct {
-	Host     string
-	Port     string
-	Database string
-	User     string
-	Password string
-	Timeout  time.Duration
+	Host     string        `env:"POSTGRES_HOST,required,notEmpty"`
+	Port     string        `env:"POSTGRES_PORT,required,notEmpty"`
+	Database string        `env:"POSTGRES_DB,required,notEmpty"`
+	User     string        `env:"POSTGRES_USER,required,notEmpty"`
+	Password string        `env:"POSTGRES_PASSWORD,required,notEmpty"`
+	Timeout  time.Duration `env:"DB_TIMEOUT,required,notEmpty"`
+}
+
+// ParserConfig — настройки парсера. Расписание сюда не входит: парсер
+// одноразовый, его запускает крон.
+type ParserConfig struct {
+	// RetentionWeeks — глубина истории снепшотов; 0 = хранить всё.
+	RetentionWeeks int `env:"SNAPSHOT_RETENTION_WEEKS" envDefault:"0"`
+}
+
+// DSN — адрес подключения для pgx.
+//
+// Собирается через url.URL, а не Sprintf: пароль со спецсимволами (@, /, :)
+// иначе разъехался бы по частям адреса.
+func (c PostgresConfig) DSN() string {
+	return c.dsn("postgres")
+}
+
+// MigrateDSN — тот же адрес со схемой pgx5: под этим именем golang-migrate
+// регистрирует драйвер database/pgx/v5.
+func (c PostgresConfig) MigrateDSN() string {
+	return c.dsn("pgx5")
+}
+
+func (c PostgresConfig) dsn(scheme string) string {
+	u := url.URL{
+		Scheme: scheme,
+		User:   url.UserPassword(c.User, c.Password),
+		Host:   net.JoinHostPort(c.Host, c.Port),
+		Path:   c.Database,
+	}
+
+	return u.String()
+}
+
+// LoadPostgres читает только настройки БД. Мигратору не нужны ни доступы
+// к Google Sheets, ни токен бота, а Load потребовал бы их все.
+func LoadPostgres() (PostgresConfig, error) {
+	var cfg PostgresConfig
+
+	if err := env.Parse(&cfg); err != nil {
+		return PostgresConfig{}, err
+	}
+
+	return cfg, nil
 }
 
 func Load() (Config, error) {
-	var missing []string
+	var cfg Config
 
-	get := func(key string) string {
-		v := os.Getenv(key)
-		if v == "" {
-			missing = append(missing, key)
-		}
-		return v
+	// env.Parse собирает все проблемы разом, а не падает на первой,
+	// поэтому недостающие переменные видно одним списком.
+	if err := env.Parse(&cfg); err != nil {
+		return Config{}, err
 	}
 
-	dbTimeout, err := time.ParseDuration(get("DB_TIMEOUT"))
-	if err != nil && len(missing) == 0 {
-		return Config{}, fmt.Errorf("DB_TIMEOUT: %w", err)
-	}
-
-	cfg := Config{
-		Sheets: SheetsConfig{
-			SpreadsheetID: get("SPREADSHEET_ID"),
-			SheetName:     get("SHEET_NAME"),
-		},
-		Postgres: PostgresConfig{
-			Host:     get("POSTGRES_HOST"),
-			Port:     get("POSTGRES_PORT"),
-			Database: get("POSTGRES_DB"),
-			User:     get("POSTGRES_USER"),
-			Password: get("POSTGRES_PASSWORD"),
-			Timeout:  dbTimeout,
-		},
-	}
-
-	if len(missing) > 0 {
-		return Config{}, fmt.Errorf("missing required env vars: %v", missing)
+	if cfg.Parser.RetentionWeeks < 0 {
+		return Config{}, fmt.Errorf(
+			"SNAPSHOT_RETENTION_WEEKS: must not be negative, got %d", cfg.Parser.RetentionWeeks)
 	}
 
 	return cfg, nil

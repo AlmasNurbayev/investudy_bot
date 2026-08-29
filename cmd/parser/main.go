@@ -4,10 +4,15 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"investudy_bot/internal/config"
-	"investudy_bot/internal/logger"
 	"investudy_bot/internal/db"
+	"investudy_bot/internal/logger"
+	"investudy_bot/internal/parser"
+	"investudy_bot/internal/repository"
+	"investudy_bot/internal/sheets"
 )
 
 func main() {
@@ -19,13 +24,40 @@ func main() {
 		os.Exit(1)
 	}
 
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	repo, err := db.New(ctx, cfg.Postgres)
 	if err != nil {
-		logger.ERROR("repository", "err", err)
+		logger.ERROR("database", "err", err)
 		os.Exit(1)
 	}
-	defer repo.Close(ctx)
-	defer repo.Commit(ctx)
+	// Закрытие идёт по своему контексту: ctx к этому моменту уже отменён сигналом.
+	defer repo.Close(context.Background())
+
+	client, err := sheets.New(ctx, cfg.Sheets)
+	if err != nil {
+		logger.ERROR("sheets", "err", err)
+		os.Exit(1)
+	}
+
+	logger.INF("parser started", "retention_weeks", cfg.Parser.RetentionWeeks)
+
+	// Один синк и выход: расписание — на кроне. Ненулевой код возврата
+	// нужен, чтобы крон увидел неудачу.
+	svc := parser.New(client, store{repository.NewStore(repo)}, cfg.Parser.RetentionWeeks)
+	if err = svc.Sync(ctx); err != nil {
+		logger.ERROR("sync", "err", err)
+		os.Exit(1)
+	}
+}
+
+// store подгоняет конкретный *repository.Tx под интерфейс parser.Tx: Go не считает
+// метод, возвращающий конкретный тип, реализацией метода, возвращающего интерфейс.
+type store struct {
+	*repository.Store
+}
+
+func (s store) Begin(ctx context.Context) (parser.Tx, error) {
+	return s.Store.Begin(ctx)
 }

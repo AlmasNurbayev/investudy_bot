@@ -1,2 +1,6 @@
 .env
 *.json
+docker-compose.local.yml
+
+# файлы базы (bind-mount из deploy/docker-compose.yml)
+_volume_db/

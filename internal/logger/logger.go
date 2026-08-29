@@ -16,6 +16,10 @@ func DBG(msg string, args ...any) {
 	l.Debug(msg, args...)
 }
 
+func INF(msg string, args ...any) {
+	l.Info(msg, args...)
+}
+
 func WRN(msg string, args ...any) {
 	l.Warn(msg, args...)
 }

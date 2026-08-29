@@ -1,0 +1,108 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_NAME: investudy_bot
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # Релизные бинарники golangci-lint собираются предыдущей версией Go и
+      # отказываются линтить модуль с более новой директивой go в go.mod:
+      # "the Go language version used to build golangci-lint is lower than
+      # the targeted Go version". Сборка из исходников тем же тулчейном это снимает.
+      # Версия закреплена ради воспроизводимости CI; для обновления поднять здесь.
+      - name: Install golangci-lint
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
+
+      - name: Lint
+        run: golangci-lint run ./...
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    # Интеграционные тесты репозитория без TEST_DATABASE_URL молча пропускаются,
+    # поэтому в CI поднимается настоящий Postgres — иначе весь слой записи в БД
+    # остался бы непокрытым.
+    services:
+      postgres:
+        image: postgres:17.3-alpine3.21
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: investudy
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # Тем же мигратором, что и в проде: так CI проверяет реальный путь наката,
+      # а не отдельную psql-обвязку, которая может с ним разойтись.
+      - name: Apply migrations
+        env:
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: 5432
+          POSTGRES_DB: investudy
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: test
+          DB_TIMEOUT: 30s
+        run: go run ./cmd/migrator -typeTask up
+
+      # -race сюда не добавлен намеренно: он требует cgo, а разделяемого состояния
+      # между горутинами в коде пока нет. Появится — включить, на ubuntu-runner'е
+      # cgo доступен из коробки.
+      - name: Test
+        env:
+          TEST_DATABASE_URL: postgres://postgres:test@localhost:5432/investudy
+        run: go test ./...
+
+  docker:
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      # github.ref_name на пуше тега — это сам тег (v1.2.3).
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+            ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
