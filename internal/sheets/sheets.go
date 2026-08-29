@@ -163,6 +163,16 @@ func (c *Client) Fetch(ctx context.Context) ([]model.Row, error) {
 	return rows, nil
 }
 
+// moneyScale — точность денежных колонок, та же, что у NUMERIC(17,2) в схеме.
+const moneyScale = 2
+
+// moneyCols — колонки с суммами. Курс сюда не входит: у него своя точность
+// NUMERIC(17,8), и длинная дробь для него нормальна.
+var moneyCols = []int{
+	colDebetVal, colCreditVal, colDebet, colCredit,
+	colSumDash, colSumRevenue, colSumCost, colSumReturn,
+}
+
 // parseRows отбирает содержательные строки листа.
 //
 // Признак действительности строки — заполненная дата. Пустая дата означает
@@ -173,10 +183,25 @@ func parseRows(values [][]any) ([]model.Row, int, error) {
 	rows := make([]model.Row, 0, len(values))
 	skipped := 0
 
+	// Суммы с длинной дробью (формулы в листе дают, например, 17,33333) округляет
+	// Postgres при записи в NUMERIC(17,2) — точной десятичной арифметикой, точнее
+	// чем это сделал бы Go на float64. Поэтому здесь только считаем такие значения,
+	// а не трогаем: без счётчика их наличие в листе никак не заметить.
+	overScale, example := 0, ""
+
 	for i, raw := range values {
 		if cell(raw, colDate) == "" {
 			skipped++
 			continue
+		}
+
+		for _, col := range moneyCols {
+			if v := cell(raw, col); decimals(v) > moneyScale {
+				overScale++
+				if example == "" {
+					example = fmt.Sprintf("строка %d: %q", i+firstDataRow, v)
+				}
+			}
 		}
 
 		row, err := parseRow(raw)
@@ -188,7 +213,21 @@ func parseRows(values [][]any) ([]model.Row, int, error) {
 		rows = append(rows, row)
 	}
 
+	if overScale > 0 {
+		logger.WRN("amounts rounded to 2 decimals",
+			"count", overScale, "example", example)
+	}
+
 	return rows, skipped, nil
+}
+
+// decimals возвращает число знаков после десятичного разделителя.
+func decimals(s string) int {
+	if i := strings.IndexAny(s, ".,"); i >= 0 {
+		return len(s) - i - 1
+	}
+
+	return 0
 }
 
 // cell возвращает ячейку строки. Google Sheets обрезает хвостовые пустые ячейки,

@@ -218,28 +218,123 @@ func TestSecondSyncReplacesCurrent(t *testing.T) {
 		t.Errorf("divisions = %d, want 1 (апсерт, а не вставка)", divisions)
 	}
 
-	// Прунинг оставляет новейший срез недели и уносит строки старого каскадом.
-	deleted, err := store.Prune(ctx, 0)
+	// Оба среза свежие, поэтому месячная схема не должна тронуть ни одного:
+	// всё за последние 30 дней сохраняется целиком.
+	deleted, err := store.Prune(ctx, repository.SchemeMonthly)
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if deleted != 0 {
+		t.Errorf("pruned %d snapshots, want 0 (оба в 30-дневном окне)", deleted)
+	}
+
+	var newest int64
+	if err = conn.QueryRow(ctx, `SELECT id FROM snapshots ORDER BY taken_at DESC LIMIT 1`).Scan(&newest); err != nil {
+		t.Fatalf("read newest snapshot: %v", err)
+	}
+	if newest != second {
+		t.Errorf("newest snapshot is %d, want %d", newest, second)
+	}
+}
+
+// Месячная схема: всё за последние 30 дней плюс по одному новейшему срезу
+// за каждый предшествующий месяц.
+func TestPruneMonthly(t *testing.T) {
+	store, conn := newStore(t)
+	ctx := context.Background()
+
+	// Даты строятся от начала месяца, чтобы пары гарантированно попадали
+	// в один календарный месяц независимо от того, когда прогоняется тест.
+	if _, err := conn.Exec(ctx, `
+		INSERT INTO snapshots (taken_at) VALUES
+		  (now()),                                                                -- окно 30 дней
+		  (now() - interval '5 days'),                                            -- окно
+		  (now() - interval '25 days'),                                           -- окно
+		  (date_trunc('month', now()) - interval '3 months' + interval '5 days'), -- месяц A, старший
+		  (date_trunc('month', now()) - interval '3 months' + interval '20 days'),-- месяц A, новейший
+		  (date_trunc('month', now()) - interval '6 months' + interval '2 days')  -- месяц B, один
+	`); err != nil {
+		t.Fatalf("seed snapshots: %v", err)
+	}
+
+	deleted, err := store.Prune(ctx, repository.SchemeMonthly)
 	if err != nil {
 		t.Fatalf("prune: %v", err)
 	}
 	if deleted != 1 {
-		t.Errorf("pruned %d snapshots, want 1", deleted)
+		t.Errorf("pruned %d snapshots, want 1 (только старший из месяца A)", deleted)
 	}
 
-	var left int64
-	if err = conn.QueryRow(ctx, `SELECT id FROM snapshots`).Scan(&left); err != nil {
-		t.Fatalf("read remaining snapshot: %v", err)
+	var left int
+	if err = conn.QueryRow(ctx, `SELECT count(*) FROM snapshots`).Scan(&left); err != nil {
+		t.Fatalf("count: %v", err)
 	}
-	if left != second {
-		t.Errorf("survived snapshot %d, want newest %d", left, second)
+	if left != 5 {
+		t.Errorf("осталось %d версий, want 5 (3 в окне + по одной на два месяца)", left)
 	}
 
-	if err = conn.QueryRow(ctx, `SELECT count(*) FROM data`).Scan(&total); err != nil {
-		t.Fatalf("count data: %v", err)
+	// В месяце A должен выжить именно новейший срез.
+	var survivorDay int
+	if err = conn.QueryRow(ctx, `
+		SELECT EXTRACT(DAY FROM (taken_at AT TIME ZONE 'Asia/Almaty'))::int
+		FROM snapshots
+		WHERE taken_at < now() - interval '30 days'
+		  AND date_trunc('month', taken_at) = date_trunc('month', now() - interval '3 months')
+	`).Scan(&survivorDay); err != nil {
+		t.Fatalf("read survivor: %v", err)
 	}
-	if total != 2 {
-		t.Errorf("data has %d rows after prune, want 2 (CASCADE)", total)
+	if survivorDay != 21 {
+		t.Errorf("в месяце A выжил срез %d-го числа, want 21 (начало месяца + 20 дней)", survivorDay)
+	}
+}
+
+// Денежные колонки объявлены как NUMERIC(17,2). Это даёт две гарантии, которые
+// легко потерять при правке схемы, поэтому они закреплены тестом.
+func TestNumericPrecision(t *testing.T) {
+	store, conn := newStore(t)
+	ctx := context.Background()
+
+	publish(t, store, sampleRows(t))
+
+	// 1. Масштаб сохраняется: без scale значение легло бы как «46829»,
+	//    и отчёты показывали бы разное число знаков в соседних строках.
+	var debet, sumCost string
+	if err := conn.QueryRow(ctx,
+		`SELECT debet::text, sum_cost::text FROM data WHERE num_oper = '177'`).
+		Scan(&debet, &sumCost); err != nil {
+		t.Fatalf("read amounts: %v", err)
+	}
+	if debet != "46829.00" || sumCost != "46829.00" {
+		t.Errorf("debet=%q sum_cost=%q, want обе %q", debet, sumCost, "46829.00")
+	}
+
+	// 2. Значение за пределами 17 значащих цифр отвергается ошибкой, а не
+	//    искажается молча. Именно там float64 перестаёт быть точным, поэтому
+	//    граница колонки закрывает его обрыв по построению.
+	rows := sampleRows(t)
+	rows[0].Debet = null.FloatFrom(1e16) // 17 цифр до запятой — не влезает в (17,2)
+
+	tx, err := store.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	id, err := tx.BeginSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("begin snapshot: %v", err)
+	}
+	if _, err = tx.InsertRows(ctx, id, rows); err == nil {
+		t.Fatal("переполнение NUMERIC(17,2) прошло молча, ожидалась ошибка")
+	}
+}
+
+// Неизвестная схема должна отвергаться, а не молча ничего не делать.
+func TestPruneRejectsUnknownScheme(t *testing.T) {
+	store, _ := newStore(t)
+
+	if _, err := store.Prune(context.Background(), "weekly"); err == nil {
+		t.Fatal("expected error for unknown scheme")
 	}
 }
 

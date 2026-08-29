@@ -1,7 +1,6 @@
 package config
 
 import (
-	"fmt"
 	"net"
 	"net/url"
 	"time"
@@ -12,7 +11,6 @@ import (
 type Config struct {
 	Sheets   SheetsConfig
 	Postgres PostgresConfig
-	Parser   ParserConfig
 }
 
 type SheetsConfig struct {
@@ -28,13 +26,6 @@ type PostgresConfig struct {
 	User     string        `env:"POSTGRES_USER,required,notEmpty"`
 	Password string        `env:"POSTGRES_PASSWORD,required,notEmpty"`
 	Timeout  time.Duration `env:"DB_TIMEOUT,required,notEmpty"`
-}
-
-// ParserConfig — настройки парсера. Расписание сюда не входит: парсер
-// одноразовый, его запускает крон.
-type ParserConfig struct {
-	// RetentionWeeks — глубина истории снепшотов; 0 = хранить всё.
-	RetentionWeeks int `env:"SNAPSHOT_RETENTION_WEEKS" envDefault:"0"`
 }
 
 // DSN — адрес подключения для pgx.
@@ -81,11 +72,6 @@ func Load() (Config, error) {
 	// поэтому недостающие переменные видно одним списком.
 	if err := env.Parse(&cfg); err != nil {
 		return Config{}, err
-	}
-
-	if cfg.Parser.RetentionWeeks < 0 {
-		return Config{}, fmt.Errorf(
-			"SNAPSHOT_RETENTION_WEEKS: must not be negative, got %d", cfg.Parser.RetentionWeeks)
 	}
 
 	return cfg, nil

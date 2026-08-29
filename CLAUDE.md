@@ -1,114 +1,158 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Этот файл — инструкция для Claude Code (claude.ai/code) при работе с кодом репозитория.
 
-## Project Overview
+## О проекте
 
-Telegram bot providing financial information to users. Data flows from Google Sheets → PostgreSQL → Telegram bot (Go).
+Telegram-бот, отдающий пользователям финансовую информацию. Данные идут по цепочке Google Sheets → PostgreSQL → Telegram-бот (Go).
 
-Three separate binaries:
+Четыре бинарника, один общий Docker-образ:
 
-- **cmd/parser/** — сервис загрузки данных из Google Sheets в PostgreSQL
-- **cmd/bot/** — Telegram-бот, читает из PostgreSQL
-- **cmd/migrator/** — запускает миграции БД (golang-migrate), используется при деплое до старта остальных сервисов
+| Бинарник | Роль | Как живёт |
+| --- | --- | --- |
+| **cmd/parser/** | загрузка среза из Google Sheets в PostgreSQL | одноразовый, запускается кроном |
+| **cmd/migrator/** | миграции БД (golang-migrate) | одноразовый, стартует до сервисов |
+| **cmd/prunedb/** | чистка истории снепшотов (`-scheme monthly`) | одноразовый, запускается кроном |
+| **cmd/bot/** | Telegram-бот, читает из PostgreSQL | демон (ещё не написан) |
 
-## Architecture
+## Архитектура
 
 ```
 Google Sheets
+     │  Sheets API v4 (REST + oauth2/jwt)
+     ▼
+cmd/parser        одноразовый: один срез → выход
      │
      ▼
-parser/ (Go)          ← uses Google Sheets API v4
+PostgreSQL        единственный источник правды
+     ▲   ▲
+     │   └── cmd/prunedb   чистка истории по расписанию
      │
-     ▼
-PostgreSQL            ← shared database
-     │
-     ▼
-bot/ (Go)             ← uses github.com/go-telegram/bot
+cmd/bot           читает только вью data_current
      │
      ▼
 Telegram users
 ```
 
-### parser/
+### parser
 
-Fetches spreadsheet data on a schedule (cron or ticker), transforms rows into domain structs, upserts into PostgreSQL. Credentials via Google service account JSON (path in env).
+Читает лист целиком, превращает строки в доменные структуры и публикует их одной транзакцией как новую версию среза. **Одноразовый**: расписание — на кроне, а не тикер внутри процесса, поэтому ненулевой код возврата служит сигналом о неудаче. Доступ — service account JSON, путь в env.
 
-### bot/
+Официальный SDK `google.golang.org/api/sheets/v4` намеренно не используется: он линкует gRPC и OpenTelemetry (445 пакетов против 215), хотя Sheets API чисто REST-ный и нужен ровно один GET.
 
-Telegram bot на `github.com/go-telegram/bot`. Регистрация хендлеров через `bot.RegisterHandler`, запуск через `b.Start(ctx)`. Обрабатывает команды пользователей, читает из PostgreSQL, отправляет ответы. Stateless — всё состояние в БД.
+### bot
 
-### Database
+Telegram-бот на `github.com/go-telegram/bot`. Регистрация хендлеров через `bot.RegisterHandler`, запуск через `b.Start(ctx)`. Обрабатывает команды пользователей, читает из PostgreSQL, отправляет ответы. Stateless — всё состояние в БД.
 
-Драйвер — `pgx` (`github.com/jackc/pgx/v5`). Миграции — `golang-migrate/migrate` с pgx-драйвером. Файлы миграций в `migrate/` в формате `000001_name.up.sql` / `000001_name.down.sql`.
-Миграции должны быть идемпотентными - их многократный запуск не должен портить данные.
+### База данных
 
-**Таблица `data` версионируется еженедельными снепшотами — перед написанием любых запросов к ней читать [docs/data-versioning.md](docs/data-versioning.md).** Кратко: у каждой строки есть `snapshot_id` → `snapshots(id)`, поэтому запрос без фильтра по версии вернёт все срезы разом и задвоит суммы. Читающий код (бот) обращается только к вью `data_current`; произвольную версию (веб-отчёт, сравнение периодов) берут из `data` с явным `snapshot_id`.
+Драйвер — `pgx` (`github.com/jackc/pgx/v5`). Миграции — `golang-migrate/migrate` с pgx-драйвером; они **вшиты в бинарник мигратора** через `go:embed` (`migrate/embed.go`), поэтому копировать каталог в образ не нужно и бинарник не может разъехаться с миграциями. Файлы в `migrate/` в формате `000001_name.up.sql` / `000001_name.down.sql`.
 
-## Environment Variables
+Требования к миграциям:
 
-Все переменные хранятся в едином `.env` в корне репозитория и загружаются обоими сервисами.
+- **Только DDL.** Никаких `TRUNCATE`, `UPDATE`, `DELETE` — миграция не трогает данные.
+- **Идемпотентность** — многократный запуск не должен портить данные (`CREATE TABLE IF NOT EXISTS`, `DROP … IF EXISTS`).
+- Объекты, связанные обязательным (`NOT NULL`) FK, создаются в одной миграции: иначе `ADD COLUMN NOT NULL` упрётся в требование пустой таблицы.
 
-| Variable                  | Description                      |
-| ------------------------- | -------------------------------- |
-| `SPREADSHEET_ID`          | ID документа Google Sheets       |
-| `SHEET_NAME`              | Название листа (например, `ДДС`) |
-| `GOOGLE_CREDENTIALS_FILE` | Путь к service account JSON      |
-| `POSTGRES_HOST`           | Хост PostgreSQL                  |
-| `POSTGRES_PORT`           | Порт PostgreSQL                  |
-| `POSTGRES_DB`             | Имя базы данных                  |
-| `POSTGRES_USER`           | Пользователь                     |
-| `POSTGRES_PASSWORD`       | Пароль                           |
-| `TELEGRAM_BOT_TOKEN`      | Токен от @BotFather              |
+**Таблица `data` версионируется снепшотами — перед написанием любых запросов к ней читать [docs/data-versioning.md](docs/data-versioning.md).** Кратко: у каждой строки есть `snapshot_id` → `snapshots(id)`, поэтому запрос без фильтра по версии вернёт все срезы разом и задвоит суммы. Читающий код (бот) обращается только к вью `data_current`; произвольную версию (веб-отчёт, сравнение периодов) берут из `data` с явным `snapshot_id`.
 
-## Development (make)
+Глубину истории держит `cmd/prunedb`: схема `monthly` оставляет все срезы за последние 30 дней и по одному, новейшему, за каждый предшествующий месяц.
 
-Для локальной разработки используется `Makefile`.
+**Таймзона — `Asia/Almaty`**, зашита в двух местах, которые обязаны совпадать: `timezone` в `deploy/pg_conf/postgresql.conf` и generated-колонки `snapshots.year/month/week` в миграции. UTC здесь не годится: Алматы это UTC+5, поэтому ночной прогон кроном в UTC уехал бы на предыдущие сутки — срез, снятый в понедельник в 03:00, попал бы в воскресную неделю, а снятый 1 марта — в февраль.
+
+Код на зону не завязан вовсе: `prunedb` группирует по готовым колонкам `year`/`month`, а не считает границу месяца сам. Поэтому граница в отчёте и в удалении одна по построению, и синхронизировать нечего.
+
+## Переменные окружения
+
+Все переменные хранятся в едином `.env` в корне репозитория. Разбор — `caarlos0/env` по тегам структур (`internal/config`), недостающие переменные сообщаются одним списком.
+
+| Переменная                | Назначение                                    |
+| ------------------------- | --------------------------------------------- |
+| `SPREADSHEET_ID`          | ID документа Google Sheets                    |
+| `SHEET_NAME`              | Название листа (например, `ДДС`)              |
+| `GOOGLE_CREDENTIALS_FILE` | Путь к service account JSON                   |
+| `POSTGRES_HOST`           | Хост PostgreSQL                               |
+| `POSTGRES_PORT`           | Порт PostgreSQL                               |
+| `POSTGRES_DB`             | Имя базы данных                               |
+| `POSTGRES_USER`           | Пользователь                                  |
+| `POSTGRES_PASSWORD`       | Пароль                                        |
+| `DB_TIMEOUT`              | Таймаут подключения и запросов (`30s`)        |
+| `TELEGRAM_BOT_TOKEN`      | Токен от @BotFather (понадобится боту)        |
+
+Расписаний в конфиге нет: `parser` и `prunedb` одноразовые, их запускает крон. Схема чистки — флаг `prunedb -scheme`, а не переменная: это параметр запуска, а не настройка среды.
+
+Мигратору и `prunedb` нужны только `POSTGRES_*` и `DB_TIMEOUT` — они читают конфиг через `config.LoadPostgres()`, а не через `Load()`, чтобы не требовать доступов к Sheets.
+
+`TZ=Asia/Almaty` задаётся не в `.env`, а в `deploy/docker-compose.yml`: это настройка контейнера. **Без кавычек** — `TZ='Asia/Almaty'` в YAML-списке попадёт в значение вместе с кавычками, имя зоны станет невалидным и молча откатится на UTC.
+
+## Разработка (make)
 
 ```bash
-make dev-bot      # запустить бота (go run)
-make dev-parser   # запустить парсер (go run)
-make migrate      # migrate -path migrate -database $DATABASE_URL up
-make migrate-down # откат последней миграции
-make test         # go test ./...
-make test-pkg PKG=./bot/internal/handler/...  # тесты одного пакета
-make lint         # golangci-lint run ./...
+make help              # список целей
+make dev-parser        # один прогон парсера
+make migrate-up        # накатить миграции
+make migrate-down      # откатить последнюю
+make prune             # чистка истории (SCHEME=monthly)
+make build             # бинарники в _bin/
+make test              # тесты без БД (интеграционные пропускаются)
+make test-integration TEST_DATABASE_URL=postgres://...   # тесты с БД
+make lint / vet / fmt
+make check             # fmt + vet + lint + test
+make up / down / ps / logs   # стенд из deploy/
 ```
 
-## Deploy (Docker)
+`Makefile` подхватывает `.env` автоматически. Две неочевидности зафиксированы прямо в нём:
 
-Все три бинарника (`bot`, `parser`, `migrator`) собираются в один образ — см. `Dockerfile`. Продуктивный запуск через `docker-compose.yml`; `bot` и `parser` зависят от `migrator` (`service_completed_successfully`).
+- `TEST_DATABASE_URL` **не выводится** из `.env` — интеграционные тесты начинают с `TRUNCATE`, и прогон против боевой базы стёр бы данные. Адрес указывается явно.
+- Цели форматирования перечисляют каталоги, а не `.`: обход всего репозитория спотыкается на `_volume_db` (файлы базы, root, 0700).
+
+## Деплой (Docker)
+
+Все бинарники собираются в один образ (`go build -o /out/ ./cmd/...` — команды подхватываются автоматически, перечислять поимённо нельзя, иначе сборка падает на ещё не написанной). Продуктив — `deploy/docker-compose.yml`, пока только Postgres.
+
+Схему накатывает сам сервис при старте цепочкой в `CMD`, поэтому мигратор гарантированно отрабатывает раньше и `depends_on` не нужен:
+
+```dockerfile
+CMD ["sh", "-c", "/app/migrator -typeTask up && exec /app/parser"]
+```
+
+`exec` обязателен: без него `SIGTERM` от `docker stop` дойдёт до `sh`, а не до сервиса.
 
 ```bash
-docker compose up -d        # поднять в продуктиве
-docker compose build        # пересобрать образ
-docker compose logs -f bot  # логи бота
+make up            # поднять Postgres
+make logs          # логи
+docker build -t investudy_bot:latest .
 ```
 
-## Module Layout (planned)
+Файлы базы — bind-mount `_volume_db` в корне репозитория. **В Postgres 18 каталог данных переехал**: `PGDATA=/var/lib/postgresql/18/docker`, том объявлен на `/var/lib/postgresql`. Привычный по старым примерам монтаж на `.../data` промахнётся мимо данных, и они уедут в анонимный том.
+
+## Раскладка модуля
+
+Один Go-модуль, `cmd/` + `internal/` (не `go.work`, не отдельные модули на сервис).
 
 ```
 investudy_bot/
-├── bot/
-│   ├── cmd/main.go
-│   └── internal/
-│       ├── handler/   # command handlers (per Telegram command)
-│       ├── repo/      # PostgreSQL queries
-│       └── service/   # business logic
-├── parser/
-│   ├── cmd/main.go
-│   └── internal/
-│       ├── sheets/    # Google Sheets client + fetcher
-│       ├── repo/      # PostgreSQL upsert logic
-│       └── model/     # shared domain structs
-├── migrate/           # SQL migration files (golang-migrate format)
+├── cmd/
+│   ├── parser/        # загрузка среза
+│   ├── migrator/      # миграции
+│   ├── prunedb/       # чистка истории
+│   └── bot/           # Telegram-бот (планируется)
+├── internal/
+│   ├── config/        # env → структуры (caarlos0/env)
+│   ├── db/            # подключение к Postgres, выдача транзакций
+│   ├── logger/        # обёртка над slog
+│   ├── model/         # доменные структуры (null-типы guregu/null)
+│   ├── sheets/        # чтение листа + разбор чисел и дат
+│   ├── repository/    # запись срезов, апсерт справочников, чистка
+│   └── parser/        # оркестрация синка
+├── migrate/           # SQL-миграции + embed.go
+├── deploy/            # docker-compose.yml, pg_conf/postgresql.conf
+├── docs/              # решения по архитектуре
 ├── Dockerfile
-├── docker-compose.yml
-├── Makefile
-└── go.work            # Go workspace linking bot/ and parser/ modules
+└── Makefile
 ```
 
-## Data Source Structure (Google Sheets → PostgreSQL)
+## Структура источника данных (Google Sheets → PostgreSQL)
 
 Лист **ДДС** (движение денежных средств) — банковские транзакции. 24 колонки:
 
@@ -148,13 +192,20 @@ investudy_bot/
 - **Действительность строки определяется полем `date`.** Строки с пустой датой (разделители, итоговые, хвост листа) отбрасываются до разбора остальных колонок — в них может лежать что угодно, и попытка их прочитать завалила бы весь синк.
 - `debet`/`credit` — взаимоисключающие: в строке заполнено только одно.
 - `sumRevenue`, `sumCost`, `sumReturn` — только одно ненулевое на строку в зависимости от `type`.
-- Числа в формате `46829,00` — при парсинге заменять `,` → `.` перед `strconv.ParseFloat`.
+- Числа в формате `46 829,00` — запятая как десятичный разделитель, пробелы (в том числе неразрывные) как разделитель разрядов.
+- **Длинные дроби (`17,33333`) парсер не округляет и не обрезает.** Округление делает Postgres при записи в `NUMERIC(17,2)` — точной десятичной арифметикой, точнее чем возможно на `float64` (`1.005` → Go даёт 1.00, Postgres 1.01). Обрезание дало бы систематическое смещение сумм вниз. Парсер только считает такие значения и предупреждает в логе.
 - `date` и `period` парсить через `time.Parse("02.01.2006", v)`.
+- Строка с датой обязана разбираться целиком: битая сумма в ней роняет синк, а не пропускается молча — иначе проводка исчезла бы из отчёта незаметно.
+- Пустые ячейки — это `NULL`, а не ноль. В доменных структурах используются null-типы `guregu/null` (`null.Float`, `null.Time`), а не указатели.
+- **Денежные колонки — `NUMERIC(17,2)`, курс — `NUMERIC(17,8)`.** Суммы держатся в `float64`, а он точен ровно до 17 значащих цифр; с 18-й идёт тихое искажение. Колонка больше 17 цифр не принимает, поэтому всё прошедшее в неё представимо в `float64` точно, а остальное отвергается ошибкой — обрыв закрыт по построению. Явный scale заодно сохраняет масштаб: без него «46829,00» легло бы как `46829`. Агрегации считаются в Postgres по `NUMERIC` и точны. Менять precision на 18+ нельзя — это откроет обрыв.
+- Google Sheets обрезает хвостовые пустые ячейки, поэтому строка бывает короче 24 колонок — обращение по индексу должно это переживать.
 
-## Key Design Decisions
+## Ключевые архитектурные решения
 
-- Два бинарника в одном Docker-образе — упрощает сборку и деплой, но сервисы управляются независимо через docker-compose `command`.
-- `go.work` workspace allows both modules to share local packages (e.g. `model/`) without publishing.
-- PostgreSQL is the single source of truth; the parser is the only writer, the bot is read-only.
-- Google Sheets credentials must never be committed — use env var pointing to a file outside the repo.
-- Зависимости передаются через интерфейсы — репозитории и внешние клиенты описываются интерфейсом в пакете-потребителе, конкретная реализация передаётся через конструктор.
+- Все бинарники в одном Docker-образе — упрощает сборку и деплой; конкретный сервис выбирается через `command`.
+- Один Go-модуль вместо `go.work` с модулем на сервис: пакеты и так общие, а workspace добавлял бы церемоний без выгоды.
+- PostgreSQL — единственный источник правды; парсер единственный пишет, бот только читает.
+- Зависимости передаются через интерфейсы — репозитории и внешние клиенты описываются интерфейсом **в пакете-потребителе**, конкретная реализация передаётся через конструктор.
+- Google Sheets credentials никогда не коммитятся — env-переменная указывает на файл вне репозитория; `.dockerignore` дополнительно исключает `.env` и `*.json` из контекста сборки.
+- Каталоги, начинающиеся с `_`, — рабочие (`_volume_db`, `_bin`), исключены и из git, и из контекста Docker.
+- Публикация среза атомарна за счёт MVCC: строка `snapshots` и строки `data` создаются в одной транзакции, поэтому флаг «готовности» не нужен — недостроенная версия невидима другим сессиям до `COMMIT`.

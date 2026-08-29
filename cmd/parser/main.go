@@ -27,13 +27,13 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	repo, err := db.New(ctx, cfg.Postgres)
+	conn, err := db.New(ctx, cfg.Postgres)
 	if err != nil {
 		logger.ERROR("database", "err", err)
 		os.Exit(1)
 	}
 	// Закрытие идёт по своему контексту: ctx к этому моменту уже отменён сигналом.
-	defer repo.Close(context.Background())
+	defer conn.Close(context.Background())
 
 	client, err := sheets.New(ctx, cfg.Sheets)
 	if err != nil {
@@ -41,11 +41,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger.INF("parser started", "retention_weeks", cfg.Parser.RetentionWeeks)
+	logger.INF("parser started")
 
 	// Один синк и выход: расписание — на кроне. Ненулевой код возврата
 	// нужен, чтобы крон увидел неудачу.
-	svc := parser.New(client, store{repository.NewStore(repo)}, cfg.Parser.RetentionWeeks)
+	svc := parser.New(client, store{repository.NewStore(conn)})
 	if err = svc.Sync(ctx); err != nil {
 		logger.ERROR("sync", "err", err)
 		os.Exit(1)

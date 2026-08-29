@@ -134,6 +134,43 @@ func TestParseRowsSkipsRowsWithoutDate(t *testing.T) {
 	}
 }
 
+func TestDecimals(t *testing.T) {
+	cases := map[string]int{
+		"":          0,
+		"42":        0,
+		"17,33":     2,
+		"17.33333":  5,
+		"46 829,00": 2,
+		"0,0021834": 7,
+	}
+
+	for in, want := range cases {
+		if got := decimals(in); got != want {
+			t.Errorf("decimals(%q) = %d, want %d", in, got, want)
+		}
+	}
+}
+
+// Длинную дробь в суммах округляет Postgres при записи в NUMERIC(17,2); парсер
+// её не трогает, но обязан донести значение без потерь — иначе округление
+// произошло бы дважды, на float64 и в базе, и второе получило бы неверный вход.
+func TestParseRowsKeepsLongFractions(t *testing.T) {
+	values := [][]any{
+		{"05.03.2026", "177", "перевод", "", "", "", "17,33333"},
+	}
+
+	rows, _, err := parseRows(values)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("parsed %d rows, want 1", len(rows))
+	}
+	if got := rows[0].Debet; !got.Valid || got.Float64 != 17.33333 {
+		t.Errorf("Debet = %+v, want 17.33333 без округления в Go", got)
+	}
+}
+
 // Строка с датой обязана разбираться целиком: тихо проглотить проводку с битой
 // суммой хуже, чем упасть, — она пропала бы из отчёта незаметно.
 func TestParseRowsFailsOnBrokenRowWithDate(t *testing.T) {

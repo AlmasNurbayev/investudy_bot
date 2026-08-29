@@ -16,9 +16,11 @@ type Fetcher interface {
 }
 
 // Store — запись срезов в БД.
+//
+// Чистки истории здесь нет: ею занимается отдельный бинарник prunedb со своим
+// расписанием. Парсер только добавляет версии.
 type Store interface {
 	Begin(ctx context.Context) (Tx, error)
-	Prune(ctx context.Context, retentionWeeks int) (int64, error)
 }
 
 // Tx — транзакция одного синка.
@@ -31,13 +33,12 @@ type Tx interface {
 }
 
 type Service struct {
-	sheets         Fetcher
-	store          Store
-	retentionWeeks int
+	sheets Fetcher
+	store  Store
 }
 
-func New(sheets Fetcher, store Store, retentionWeeks int) *Service {
-	return &Service{sheets: sheets, store: store, retentionWeeks: retentionWeeks}
+func New(sheets Fetcher, store Store) *Service {
+	return &Service{sheets: sheets, store: store}
 }
 
 // Sync читает лист и публикует новую версию среза одной транзакцией.
@@ -53,8 +54,8 @@ func (s *Service) Sync(ctx context.Context) error {
 	}
 
 	// Пустой лист почти всегда означает отозванный доступ или сбитый диапазон.
-	// Опубликовать такой срез — значит показать пользователям пустой отчёт и
-	// оставить эту пустоту в истории на всю неделю, поэтому лучше упасть.
+	// Опубликовать такой срез — значит показать пользователям пустой отчёт
+	// и оставить эту пустоту в истории, поэтому лучше упасть.
 	if len(rows) == 0 {
 		return errors.New("fetch: sheet returned no rows")
 	}
@@ -66,18 +67,6 @@ func (s *Service) Sync(ctx context.Context) error {
 
 	logger.INF("snapshot published",
 		"snapshot_id", snapshotID, "rows", rowCount, "took", time.Since(started))
-
-	// Прунинг идёт после публикации и своей транзакцией: опубликованный срез от
-	// него не зависит, поэтому его ошибка — повод предупредить, а не завалить синк.
-	deleted, err := s.store.Prune(ctx, s.retentionWeeks)
-	if err != nil {
-		logger.WRN("prune", "err", err)
-		return nil
-	}
-
-	if deleted > 0 {
-		logger.INF("snapshots pruned", "deleted", deleted)
-	}
 
 	return nil
 }

@@ -5,7 +5,9 @@ import (
 	"os"
 )
 
-var l *slog.Logger
+// Значение по умолчанию, а не nil: вызов до Init иначе роняет процесс nil-паникой.
+// Init только перенастраивает вывод.
+var l = slog.Default()
 
 func Init(level slog.Level) {
 	l = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level}))

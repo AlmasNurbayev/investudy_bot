@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"github.com/guregu/null/v6"
 	"github.com/jackc/pgx/v5"
@@ -10,7 +11,7 @@ import (
 	"investudy_bot/internal/model"
 )
 
-// Beginner — источник транзакций (его реализует internal/db.Repo).
+// Beginner — источник транзакций (его реализует internal/db.Conn).
 type Beginner interface {
 	Begin(ctx context.Context) (pgx.Tx, error)
 }
@@ -218,32 +219,53 @@ func (t *Tx) cache(table, name string, id int64) {
 	t.refs[table][name] = id
 }
 
-// pruneWeekly оставляет по одному — новейшему — снепшоту на каждую ISO-неделю.
+// SchemeMonthly — схема чистки истории: оставить все срезы за последние 30 дней
+// и по одному, новейшему, за каждый предшествующий месяц.
+const SchemeMonthly = "monthly"
+
+// pruneMonthly реализует SchemeMonthly.
 //
-// Во вторник вчерашний срез перестаёт быть новейшим в своей неделе и удаляется;
-// в понедельник новый срез открывает новую неделю, а воскресный остаётся новейшим
-// в прошлой и сохраняется. Если сервис лежал несколько дней, правило само себя чинит.
+// Месяц берётся из generated-колонок year/month, а не из date_trunc: они уже
+// посчитаны в местной зоне, покрыты индексом snapshots_picker_idx, и граница
+// месяца получается ровно та же, что видит пользователь в селекторе версий.
 //
-// AT TIME ZONE 'UTC' обязателен: без явной зоны date_trunc по timestamptz зависит
-// от TimeZone сессии, и граница недели поехала бы между парсером и psql администратора.
-const pruneWeekly = `
+// Текущий срез защищён по построению. Если он свежее 30 дней — его отсекает
+// первое условие. Если загрузка давно стоит и он старше — он новейший в своём
+// месяце, значит EXISTS ложно. Отдельная оговорка про «не трогать последний»
+// не нужна.
+const pruneMonthly = `
 	DELETE FROM snapshots s
-	WHERE EXISTS (
-	    SELECT 1 FROM snapshots n
-	    WHERE n.taken_at > s.taken_at
-	      AND date_trunc('week', n.taken_at AT TIME ZONE 'UTC')
-	        = date_trunc('week', s.taken_at AT TIME ZONE 'UTC')
-	)`
+	WHERE s.taken_at < now() - interval '30 days'
+	  AND EXISTS (
+	      SELECT 1 FROM snapshots n
+	      WHERE n.taken_at > s.taken_at
+	        AND n.year  = s.year
+	        AND n.month = s.month
+	  )`
 
-// pruneOld ограничивает глубину истории, никогда не трогая текущую версию.
-const pruneOld = `
-	DELETE FROM snapshots
-	WHERE taken_at < now() - make_interval(weeks => $1)
-	  AND id <> (SELECT id FROM snapshots ORDER BY taken_at DESC LIMIT 1)`
+// pruneSchemes — доступные схемы чистки. Имя передаётся в prunedb флагом -scheme.
+var pruneSchemes = map[string]string{
+	SchemeMonthly: pruneMonthly,
+}
 
-// Prune удаляет лишние версии; строки data уносит ON DELETE CASCADE.
-// Идёт отдельной транзакцией — уже опубликованный срез от этого не зависит.
-func (s *Store) Prune(ctx context.Context, retentionWeeks int) (int64, error) {
+// Schemes возвращает имена доступных схем — для подсказки в сообщении об ошибке.
+func Schemes() []string {
+	names := make([]string, 0, len(pruneSchemes))
+	for name := range pruneSchemes {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	return names
+}
+
+// Prune удаляет лишние версии по указанной схеме; строки data уносит ON DELETE CASCADE.
+func (s *Store) Prune(ctx context.Context, scheme string) (int64, error) {
+	query, ok := pruneSchemes[scheme]
+	if !ok {
+		return 0, fmt.Errorf("unknown scheme %q: доступны %v", scheme, Schemes())
+	}
+
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("begin prune tx: %w", err)
@@ -251,23 +273,14 @@ func (s *Store) Prune(ctx context.Context, retentionWeeks int) (int64, error) {
 	// После успешного Commit откат вернёт ErrTxClosed — это ожидаемо.
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	tag, err := tx.Exec(ctx, pruneWeekly)
+	tag, err := tx.Exec(ctx, query)
 	if err != nil {
-		return 0, fmt.Errorf("prune weekly: %w", err)
-	}
-	deleted := tag.RowsAffected()
-
-	if retentionWeeks > 0 {
-		tag, err = tx.Exec(ctx, pruneOld, retentionWeeks)
-		if err != nil {
-			return 0, fmt.Errorf("prune older than %d weeks: %w", retentionWeeks, err)
-		}
-		deleted += tag.RowsAffected()
+		return 0, fmt.Errorf("prune %s: %w", scheme, err)
 	}
 
 	if err = tx.Commit(ctx); err != nil {
 		return 0, fmt.Errorf("commit prune: %w", err)
 	}
 
-	return deleted, nil
+	return tag.RowsAffected(), nil
 }
