@@ -1,8 +1,10 @@
 package config
 
 import (
+	"fmt"
 	"net"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/caarlos0/env/v11"
@@ -11,12 +13,55 @@ import (
 type Config struct {
 	Sheets   SheetsConfig
 	Postgres PostgresConfig
+	Telegram TelegramConfig
 }
 
 type SheetsConfig struct {
 	SpreadsheetID   string `env:"SPREADSHEET_ID,required,notEmpty"`
 	SheetName       string `env:"SHEET_NAME,required,notEmpty"`
 	CredentialsFile string `env:"GOOGLE_CREDENTIALS_FILE,required,notEmpty"`
+	// MinPeriod — нижняя граница загрузки: строки с period раньше этой даты
+	// не грузятся вовсе. Необязательная: пустое значение означает «грузить всё».
+	MinPeriod SheetDate `env:"MIN_PERIOD"`
+}
+
+// TelegramConfig — доступы бота. Парсеру они нужны не для чтения апдейтов,
+// а чтобы сообщить администратору о неудачной загрузке.
+//
+// Обе переменные обязательные, и намеренно: молча загружать данные, не имея
+// канала для жалобы, хуже, чем не стартовать вовсе — о падениях тогда никто
+// не узнает до первого расхождения в отчёте.
+type TelegramConfig struct {
+	Token   string `env:"TELEGRAM_BOT_TOKEN,required,notEmpty"`
+	AdminID int64  `env:"TELEGRAM_ADMIN_ID,required,notEmpty"`
+}
+
+// SheetDate — дата в формате самого листа (`02.01.2006`).
+//
+// В .env её пишет человек, который смотрит в колонку «Период», поэтому формат
+// тот же, что он там видит. Голый time.Time не годится: env разбирает его
+// через encoding.TextUnmarshaler, то есть требовал бы RFC3339.
+type SheetDate struct {
+	time.Time
+}
+
+const sheetDateLayout = "02.01.2006"
+
+func (d *SheetDate) UnmarshalText(text []byte) error {
+	s := strings.TrimSpace(string(text))
+	if s == "" {
+		*d = SheetDate{}
+		return nil
+	}
+
+	t, err := time.Parse(sheetDateLayout, s)
+	if err != nil {
+		return fmt.Errorf("expected date as %s, got %q", sheetDateLayout, s)
+	}
+
+	*d = SheetDate{t}
+
+	return nil
 }
 
 type PostgresConfig struct {

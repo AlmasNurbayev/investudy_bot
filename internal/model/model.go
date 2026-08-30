@@ -9,22 +9,28 @@ import (
 // Значения справочников хранятся здесь именами, а не id: резолвом в FK занимается
 // репозиторий, парсеру Google Sheets про идентификаторы знать незачем.
 //
-// Числа и даты — null-типы, потому что пустая ячейка означает NULL, а не ноль:
-// debet/credit взаимоисключающие, как и sum_revenue/sum_cost/sum_return.
+// Все поля, которые ложатся в колонки data, — null-типы, потому что пустая
+// ячейка означает NULL, а не ноль и не пустую строку: debet/credit
+// взаимоисключающие, как и sum_revenue/sum_cost/sum_return, а пустой текст
+// в TEXT-колонке заставил бы читающий код искать и NULL, и ”.
+//
+// Имена справочников — исключение и остаются обычными string: в data они не
+// попадают вовсе, репозиторий меняет их на id, а пустое имя там и так означает
+// NULL во внешнем ключе.
 type Row struct {
 	Date         null.Time
-	NumOper      string
-	TypeOper     string
+	NumOper      null.String
+	TypeOper     null.String
 	DebetVal     null.Float
 	CreditVal    null.Float
 	ExRate       null.Float
 	Debet        null.Float
 	Credit       null.Float
-	Sender       string
-	Description  string
-	Bank         string
+	Sender       null.String
+	Description  null.String
+	Bank         null.String
 	Period       null.Time
-	Organization string
+	Organization null.String
 
 	Division string
 	Item     string
@@ -32,8 +38,8 @@ type Row struct {
 	FinType  string
 	Vid      string
 
-	Comment1 string
-	Comment2 string
+	Comment1 null.String
+	Comment2 null.String
 
 	SumDash    null.Float
 	SumRevenue null.Float

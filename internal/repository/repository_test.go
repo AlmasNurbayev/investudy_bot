@@ -63,11 +63,11 @@ func sampleRows(t *testing.T) []model.Row {
 	return []model.Row{
 		{
 			Date:         date(t, "05.03.2026"),
-			NumOper:      "177",
+			NumOper:      null.StringFrom("177"),
 			Debet:        null.FloatFrom(46829),
-			Bank:         "Kaspi",
+			Bank:         null.StringFrom("Kaspi"),
 			Period:       date(t, "01.03.2026"),
-			Organization: "Aligee",
+			Organization: null.StringFrom("Aligee"),
 			Division:     "Отдел продаж",
 			Item:         "Аренда",
 			SubItem:      "Аренда офиса",
@@ -78,9 +78,9 @@ func sampleRows(t *testing.T) []model.Row {
 		{
 			// Пустые справочники и суммы: все FK и NUMERIC должны стать NULL.
 			Date:       date(t, "06.03.2026"),
-			NumOper:    "178",
+			NumOper:    null.StringFrom("178"),
 			Credit:     null.FloatFrom(1000),
-			Bank:       "Halyk",
+			Bank:       null.StringFrom("Halyk"),
 			Period:     date(t, "01.03.2026"),
 			FinType:    "доход",
 			SumRevenue: null.FloatFrom(1000),

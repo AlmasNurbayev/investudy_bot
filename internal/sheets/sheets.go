@@ -51,6 +51,41 @@ const (
 // firstDataRow — строка листа, с которой начинаются данные (1 — заголовок).
 const firstDataRow = 2
 
+// colTitles — заголовки колонок листа. Идут в сообщение администратору: искать
+// ошибку он будет глазами в самом листе, где колонки подписаны именно так.
+var colTitles = [...]string{
+	colDate:         "Дата",
+	colNumOper:      "#",
+	colTypeOper:     "Тип",
+	colDebetVal:     "Дебет валюта",
+	colCreditVal:    "Кредит валюта",
+	colExRate:       "Курс",
+	colDebet:        "Дебет",
+	colCredit:       "Кредит",
+	colSender:       "Бенеф-р/отправитель",
+	colDescription:  "Назначение платежа",
+	colBank:         "Банк",
+	colPeriod:       "Период",
+	colOrganization: "Организация",
+	colDivision:     "Подразделение",
+	colItem:         "Статья",
+	colSubItem:      "Подстатья",
+	colComment1:     "Учет",
+	colComment2:     "Комментарий",
+	colFinType:      "Тип",
+	colSumDash:      "СуммаДаш",
+	colVid:          "Вид",
+	colSumRevenue:   "СуммаДоход",
+	colSumCost:      "СуммаРасход",
+	colSumReturn:    "СуммаВозврат",
+}
+
+// cellAddr — адрес ячейки в нотации листа, например «W245». Колонок ровно 24,
+// A..X, поэтому двухбуквенные адреса здесь не встречаются.
+func cellAddr(col, row int) string {
+	return fmt.Sprintf("%c%d", 'A'+col, row)
+}
+
 const (
 	dateLayout      = "02.01.2006"
 	readonlyScope   = "https://www.googleapis.com/auth/spreadsheets.readonly"
@@ -68,6 +103,7 @@ type Client struct {
 	http          *http.Client
 	spreadsheetID string
 	sheetName     string
+	minPeriod     time.Time
 }
 
 // serviceAccount — та часть ключа сервис-аккаунта, которая нужна для JWT.
@@ -115,6 +151,7 @@ func New(ctx context.Context, cfg config.SheetsConfig) (*Client, error) {
 		http:          conf.Client(ctx),
 		spreadsheetID: cfg.SpreadsheetID,
 		sheetName:     cfg.SheetName,
+		minPeriod:     cfg.MinPeriod.Time,
 	}, nil
 }
 
@@ -151,16 +188,70 @@ func (c *Client) Fetch(ctx context.Context) ([]model.Row, error) {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
 
-	rows, skipped, err := parseRows(parsed.Values)
+	rows, st, err := parseRows(parsed.Values, parseOpts{
+		sheet:     c.sheetName,
+		minPeriod: c.minPeriod,
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	if skipped > 0 {
-		logger.DBG("sheet rows skipped", "reason", "empty date", "count", skipped)
+	if st.noDate > 0 {
+		logger.DBG("sheet rows skipped", "reason", "empty date", "count", st.noDate)
+	}
+
+	// Отсечённые по периоду считаются на уровне INF, а не DBG: это следствие
+	// настройки, и её эффект должен быть виден в обычном логе прогона — иначе
+	// съехавший MIN_PERIOD молча обрежет половину отчёта.
+	if st.beforeMinPeriod > 0 {
+		logger.INF("sheet rows skipped",
+			"reason", "period before MIN_PERIOD",
+			"count", st.beforeMinPeriod,
+			"min_period", c.minPeriod.Format(dateLayout))
 	}
 
 	return rows, nil
+}
+
+// RowError — ошибка разбора строки листа вместе со всем, что нужно, чтобы найти
+// её глазами: адрес ячейки, заголовок колонки, содержимое как есть и приметы
+// самой строки — банк и организация.
+//
+// Тип экспортирован ради оповещения администратора: cmd/parser достаёт поля
+// через errors.As и раскладывает их в сообщение. Внутри пакета он заполняется
+// в два приёма — parseRow знает колонку и значение, parseRows добавляет то, что
+// видно только на уровне листа.
+type RowError struct {
+	Sheet        string
+	Row          int    // номер строки, как её нумерует Google Sheets
+	Cell         string // адрес ячейки, например «W245»
+	Column       string // заголовок колонки листа
+	Value        string // содержимое ячейки как есть
+	Want         string // чего в ячейке ждали, на языке листа
+	Bank         string
+	Organization string
+	Err          error
+
+	col int // индекс колонки: адрес не собрать, пока не известен номер строки
+}
+
+func (e *RowError) Error() string {
+	return fmt.Sprintf("%s!%s (%s): %v", e.Sheet, e.Cell, e.Column, e.Err)
+}
+
+func (e *RowError) Unwrap() error { return e.Err }
+
+// parseOpts — то, что парсер строк знает не из самих строк.
+type parseOpts struct {
+	sheet string
+	// minPeriod — нижняя граница загрузки; нулевое значение отключает отсечку.
+	minPeriod time.Time
+}
+
+// parseStats — сколько строк листа отброшено и почему.
+type parseStats struct {
+	noDate          int
+	beforeMinPeriod int
 }
 
 // moneyScale — точность денежных колонок, та же, что у NUMERIC(17,2) в схеме.
@@ -179,9 +270,10 @@ var moneyCols = []int{
 // разделитель, итоговую строку или хвост листа, поэтому такие строки отбрасываются
 // до разбора остальных колонок: в них может лежать что угодно, и попытка их
 // прочитать завалила бы синк целиком.
-func parseRows(values [][]any) ([]model.Row, int, error) {
+func parseRows(values [][]any, opts parseOpts) ([]model.Row, parseStats, error) {
 	rows := make([]model.Row, 0, len(values))
-	skipped := 0
+
+	var st parseStats
 
 	// Суммы с длинной дробью (формулы в листе дают, например, 17,33333) округляет
 	// Postgres при записи в NUMERIC(17,2) — точной десятичной арифметикой, точнее
@@ -190,24 +282,55 @@ func parseRows(values [][]any) ([]model.Row, int, error) {
 	overScale, example := 0, ""
 
 	for i, raw := range values {
+		rowNum := i + firstDataRow
+
+		// Номер строки — как в самом листе: ошибку чинить придётся глазами.
+		fail := func(re *RowError) ([]model.Row, parseStats, error) {
+			re.Sheet = opts.sheet
+			re.Row = rowNum
+			re.Cell = cellAddr(re.col, rowNum)
+			re.Bank = cell(raw, colBank)
+			re.Organization = cell(raw, colOrganization)
+
+			return nil, parseStats{}, re
+		}
+
 		if cell(raw, colDate) == "" {
-			skipped++
+			st.noDate++
 			continue
+		}
+
+		// Отсечка по периоду идёт до разбора остальных колонок, и намеренно:
+		// иначе опечатка в сумме десятилетней давности роняла бы синк из-за
+		// строки, которую мы и не собирались грузить. Заодно в справочники не
+		// попадают значения, встречающиеся только в старых строках.
+		//
+		// Строка без периода остаётся: доказать, что она старая, нечем, а тихо
+		// выбросить проводку хуже, чем загрузить лишнюю.
+		if !opts.minPeriod.IsZero() {
+			period, err := parseDate(cell(raw, colPeriod))
+			if err != nil {
+				return fail(cellFault(raw, colPeriod, wantDate, err))
+			}
+
+			if period.Valid && period.Time.Before(opts.minPeriod) {
+				st.beforeMinPeriod++
+				continue
+			}
 		}
 
 		for _, col := range moneyCols {
 			if v := cell(raw, col); decimals(v) > moneyScale {
 				overScale++
 				if example == "" {
-					example = fmt.Sprintf("строка %d: %q", i+firstDataRow, v)
+					example = fmt.Sprintf("строка %d: %q", rowNum, v)
 				}
 			}
 		}
 
-		row, err := parseRow(raw)
-		if err != nil {
-			// Номер строки — как в самом листе, чтобы ошибку можно было починить глазами.
-			return nil, 0, fmt.Errorf("row %d: %w", i+firstDataRow, err)
+		row, re := parseRow(raw)
+		if re != nil {
+			return fail(re)
 		}
 
 		rows = append(rows, row)
@@ -218,7 +341,24 @@ func parseRows(values [][]any) ([]model.Row, int, error) {
 			"count", overScale, "example", example)
 	}
 
-	return rows, skipped, nil
+	return rows, st, nil
+}
+
+// Чего ждали в ячейке — формулировки для администратора, на языке листа.
+const (
+	wantNumber = "число"
+	wantDate   = "дата в формате ДД.ММ.ГГГГ"
+)
+
+// cellFault собирает ту часть RowError, которая видна по одной ячейке.
+func cellFault(raw []any, col int, want string, err error) *RowError {
+	return &RowError{
+		Column: colTitles[col],
+		Value:  cell(raw, col),
+		Want:   want,
+		Err:    err,
+		col:    col,
+	}
 }
 
 // decimals возвращает число знаков после десятичного разделителя.
@@ -239,47 +379,61 @@ func cell(raw []any, col int) string {
 	return strings.TrimSpace(fmt.Sprint(raw[col]))
 }
 
-func parseRow(raw []any) (model.Row, error) {
-	var err error
+// parseRow разбирает одну строку листа. Ошибка возвращается конкретным типом,
+// а не interface error: заполнить её до конца может только parseRows, которому
+// известны номер строки и её приметы.
+//
+// Первая же испорченная ячейка останавливает разбор строки: остальные значения
+// в такой строке всё равно никуда не поедут, а сообщать администратору нужно
+// про одну ячейку, а не про список.
+func parseRow(raw []any) (model.Row, *RowError) {
+	var fault *RowError
 
 	get := func(col int) string { return cell(raw, col) }
 
-	num := func(col int, name string) null.Float {
-		if err != nil {
+	// Пустая ячейка — это NULL, а не пустая строка: иначе читающему коду
+	// пришлось бы проверять и IS NULL, и = '' в каждом запросе.
+	text := func(col int) null.String {
+		v := get(col)
+		return null.NewString(v, v != "")
+	}
+
+	num := func(col int) null.Float {
+		if fault != nil {
 			return null.Float{}
 		}
 		v, e := parseNum(get(col))
 		if e != nil {
-			err = fmt.Errorf("%s: %w", name, e)
+			fault = cellFault(raw, col, wantNumber, e)
 		}
 		return v
 	}
 
-	date := func(col int, name string) null.Time {
-		if err != nil {
+	date := func(col int) null.Time {
+		if fault != nil {
 			return null.Time{}
 		}
 		v, e := parseDate(get(col))
 		if e != nil {
-			err = fmt.Errorf("%s: %w", name, e)
+			fault = cellFault(raw, col, wantDate, e)
 		}
 		return v
 	}
 
 	row := model.Row{
-		Date:         date(colDate, "date"),
-		NumOper:      get(colNumOper),
-		TypeOper:     get(colTypeOper),
-		DebetVal:     num(colDebetVal, "debet_val"),
-		CreditVal:    num(colCreditVal, "credit_val"),
-		ExRate:       num(colExRate, "ex_rate"),
-		Debet:        num(colDebet, "debet"),
-		Credit:       num(colCredit, "credit"),
-		Sender:       get(colSender),
-		Description:  get(colDescription),
-		Bank:         get(colBank),
-		Period:       date(colPeriod, "period"),
-		Organization: get(colOrganization),
+		Date:         date(colDate),
+		NumOper:      text(colNumOper),
+		TypeOper:     text(colTypeOper),
+		DebetVal:     num(colDebetVal),
+		CreditVal:    num(colCreditVal),
+		ExRate:       num(colExRate),
+		Debet:        num(colDebet),
+		Credit:       num(colCredit),
+		Sender:       text(colSender),
+		Description:  text(colDescription),
+		Bank:         text(colBank),
+		Period:       date(colPeriod),
+		Organization: text(colOrganization),
 
 		Division: get(colDivision),
 		Item:     get(colItem),
@@ -287,17 +441,17 @@ func parseRow(raw []any) (model.Row, error) {
 		FinType:  get(colFinType),
 		Vid:      get(colVid),
 
-		Comment1: get(colComment1),
-		Comment2: get(colComment2),
+		Comment1: text(colComment1),
+		Comment2: text(colComment2),
 
-		SumDash:    num(colSumDash, "sum_dash"),
-		SumRevenue: num(colSumRevenue, "sum_revenue"),
-		SumCost:    num(colSumCost, "sum_cost"),
-		SumReturn:  num(colSumReturn, "sum_return"),
+		SumDash:    num(colSumDash),
+		SumRevenue: num(colSumRevenue),
+		SumCost:    num(colSumCost),
+		SumReturn:  num(colSumReturn),
 	}
 
-	if err != nil {
-		return model.Row{}, err
+	if fault != nil {
+		return model.Row{}, fault
 	}
 
 	return row, nil
@@ -325,13 +479,30 @@ func parseNum(s string) (null.Float, error) {
 	return null.FloatFrom(v), nil
 }
 
+// parseDate разбирает дату листа, отбрасывая время, если оно есть.
+//
+// Значения читаются как FORMATTED_VALUE, то есть ровно так, как ячейка выглядит
+// в листе, а формат задаётся поячеечно. Поэтому в одной колонке соседствуют
+// «01.08.2026» и «01.08.2026 12:00:00» — вторая ячейка отформатирована как дата
+// со временем. Строгий разбор ронял бы на ней весь синк («extra text»).
+//
+// Время отбрасывается, а не приводится к 00:00:00: в доменной модели его нет,
+// колонки date и period в схеме — DATE, и Postgres хранит только календарный
+// день. Отбрасывание здесь лишь избавляет от падения на входе.
 func parseDate(s string) (null.Time, error) {
 	if s == "" {
 		return null.Time{}, nil
 	}
 
-	v, err := time.Parse(dateLayout, s)
+	// Fields режет по unicode.IsSpace, поэтому неразрывный пробел тоже считается.
+	day := s
+	if f := strings.Fields(s); len(f) > 0 {
+		day = f[0]
+	}
+
+	v, err := time.Parse(dateLayout, day)
 	if err != nil {
+		// В сообщении исходная ячейка целиком: чинить в листе придётся именно её.
 		return null.Time{}, fmt.Errorf("not a date %s: %q", dateLayout, s)
 	}
 

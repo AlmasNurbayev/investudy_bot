@@ -32,6 +32,31 @@ type Tx interface {
 	Rollback(ctx context.Context) error
 }
 
+// Report — итог прогона. Возвращается наружу, а не рассылается изнутри:
+// оповещением заведует cmd/parser, чтобы все тексты для администратора —
+// и про успех, и про падение — лежали в одном месте.
+type Report struct {
+	SnapshotID int64
+	Rows       int64
+	Took       time.Duration
+	Gaps       Gaps
+}
+
+// Gaps — строки без обязательной аналитики.
+//
+// Без подразделения, статьи или периода проводка не попадает ни в один разрез
+// отчёта: она есть в базе, но невидима в любой группировке. Это не ошибка
+// загрузки, поэтому синк из-за неё не падает, но и молчать нельзя — иначе
+// пропажа обнаружится только расхождением итогов.
+type Gaps struct {
+	// Rows — строк, где не хватает хотя бы одного из трёх. Меньше суммы
+	// остальных полей: в одной строке обычно пусто сразу несколько.
+	Rows       int
+	NoDivision int
+	NoItem     int
+	NoPeriod   int
+}
+
 type Service struct {
 	sheets Fetcher
 	store  Store
@@ -45,30 +70,71 @@ func New(sheets Fetcher, store Store) *Service {
 //
 // Одноразовый запуск: расписанием заведует крон, а не тикер внутри процесса.
 // Поэтому ошибка возвращается наружу — код возврата и есть сигнал крону.
-func (s *Service) Sync(ctx context.Context) error {
+func (s *Service) Sync(ctx context.Context) (Report, error) {
 	started := time.Now()
 
 	rows, err := s.sheets.Fetch(ctx)
 	if err != nil {
-		return fmt.Errorf("fetch: %w", err)
+		return Report{}, fmt.Errorf("fetch: %w", err)
 	}
 
 	// Пустой лист почти всегда означает отозванный доступ или сбитый диапазон.
 	// Опубликовать такой срез — значит показать пользователям пустой отчёт
 	// и оставить эту пустоту в истории, поэтому лучше упасть.
 	if len(rows) == 0 {
-		return errors.New("fetch: sheet returned no rows")
+		return Report{}, errors.New("fetch: sheet returned no rows")
 	}
 
 	snapshotID, rowCount, err := s.publish(ctx, rows)
 	if err != nil {
-		return err
+		return Report{}, err
+	}
+
+	report := Report{
+		SnapshotID: snapshotID,
+		Rows:       rowCount,
+		Took:       time.Since(started),
+		Gaps:       countGaps(rows),
 	}
 
 	logger.INF("snapshot published",
-		"snapshot_id", snapshotID, "rows", rowCount, "took", time.Since(started))
+		"snapshot_id", report.SnapshotID, "rows", report.Rows, "took", report.Took,
+		"rows_without_analytics", report.Gaps.Rows)
 
-	return nil
+	return report, nil
+}
+
+// countGaps считает строки без обязательной аналитики.
+//
+// Обязательный минимум — подразделение, статья и период: по ним строятся все
+// разрезы отчёта. Справочники здесь ещё именами, а не id, поэтому пустота
+// проверяется по пустой строке — репозиторий превратит её в NULL во внешнем
+// ключе.
+func countGaps(rows []model.Row) Gaps {
+	var g Gaps
+
+	for _, row := range rows {
+		missing := false
+
+		if row.Division == "" {
+			g.NoDivision++
+			missing = true
+		}
+		if row.Item == "" {
+			g.NoItem++
+			missing = true
+		}
+		if !row.Period.Valid {
+			g.NoPeriod++
+			missing = true
+		}
+
+		if missing {
+			g.Rows++
+		}
+	}
+
+	return g
 }
 
 func (s *Service) publish(ctx context.Context, rows []model.Row) (int64, int64, error) {
