@@ -1,8 +1,9 @@
 .env
 *.json
 docker-compose.local.yml
+docker-compose.yml
 
-# рабочие каталоги: файлы базы (bind-mount из deploy/docker-compose.yml)
+# рабочие каталоги: файлы базы (bind-mount из docker-compose.yml)
 # и собранные бинарники (make build). Те же исключены из контекста Docker
 # правилом _* в .dockerignore.
 _volume_db/

@@ -87,12 +87,20 @@ func (c PostgresConfig) MigrateDSN() string {
 	return c.dsn("pgx5")
 }
 
+// sslmode=disable задан явно, хотя pgx и без него подключится: по умолчанию
+// действует prefer — попытка TLS, отказ сервера (ssl выключен в
+// pg_conf/postgresql.conf) и тихий откат на открытый текст. Лишний round-trip
+// не страшен, а вот диагностика страдает: отказ TLS остаётся в ошибке первой
+// строкой, и настоящая причина сбоя («нет такой базы», «нет записи в
+// pg_hba.conf») прячется под ней. База слушает loopback, TLS на ней не поднят —
+// шифровать нечего, и притворяться, что могли бы, незачем.
 func (c PostgresConfig) dsn(scheme string) string {
 	u := url.URL{
-		Scheme: scheme,
-		User:   url.UserPassword(c.User, c.Password),
-		Host:   net.JoinHostPort(c.Host, c.Port),
-		Path:   c.Database,
+		Scheme:   scheme,
+		User:     url.UserPassword(c.User, c.Password),
+		Host:     net.JoinHostPort(c.Host, c.Port),
+		Path:     c.Database,
+		RawQuery: "sslmode=disable",
 	}
 
 	return u.String()

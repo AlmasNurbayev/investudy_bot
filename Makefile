@@ -8,11 +8,12 @@ export
 endif
 
 # Каталоги с кодом перечислены явно, а не через «.»: обход всего репозитория
-# спотыкается на _volume_db — файлы базы принадлежат root с правами 0700,
-# и gofmt падает с «permission denied», пока стенд поднят.
+# спотыкается на _volume_db — файлы базы (bind-mount из docker-compose.yml)
+# принадлежат root с правами 0700, и gofmt падает с «permission denied»,
+# пока стенд поднят.
 GO_DIRS := ./cmd ./internal ./migrate
 
-COMPOSE := docker compose -f deploy/docker-compose.yml
+COMPOSE := docker compose -f docker-compose.yml
 IMAGE   ?= investudy_bot:latest
 SCHEME  ?= monthly
 PKG     ?= ./...

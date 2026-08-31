@@ -1,3 +1,8 @@
+# ОБРАЗЕЦ. Рабочий стенд — docker-compose.yml в корне репозитория, на него
+# указывает COMPOSE в Makefile. Этот файл держится как справочный: пути в нём
+# заданы относительно deploy/, поэтому запуск отсюда поднимет второй стек
+# с другим каталогом данных — с этого и начался разъезд, описанный в CLAUDE.md.
+
 name: investudy
 
 services:
@@ -8,7 +13,7 @@ services:
     # Единый .env в корне репозитория (см. CLAUDE.md). Образу нужны POSTGRES_DB,
     # POSTGRES_USER и POSTGRES_PASSWORD — они там уже есть.
     env_file:
-      - ../.env
+      - ./.env
 
     # Без кавычек: `TZ='Asia/Almaty'` — это один YAML-скаляр, кавычки попали бы
     # внутрь значения, имя зоны стало бы невалидным и молча откатилось на UTC.
@@ -20,14 +25,13 @@ services:
     # Когда парсер и бот переедут в этот compose, публикацию можно убрать —
     # они найдут базу по имени сервиса во внутренней сети.
     #
-    # Порт задан числом, а не через ${POSTGRES_PORT}: интерполяция в compose
-    # читает .env из каталога этого файла (deploy/), а не корневой — env_file
-    # выше задаёт переменные только внутри контейнера. Подстановка молча
-    # свалилась бы в дефолт. Менять порт — здесь, синхронно с POSTGRES_PORT в .env.
+    # Порт задан числом, а не через ${POSTGRES_PORT}: подстановка завела бы
+    # лишнюю связь ради значения, которое всё равно обязано совпадать
+    # с POSTGRES_PORT в .env. Менять порт — здесь, синхронно с .env.
     ports:
-      - "127.0.0.1:5432:5432"
+      - "5432:5432"
 
-    # Файлы базы лежат в _volume_db в корне репозитория (папка в .gitignore).
+    # Файлы базы лежат в _volume_db рядом с этим файлом (папка в .gitignore).
     #
     # ВНИМАНИЕ: в Postgres 18 каталог данных переехал.
     #   17.x — PGDATA=/var/lib/postgresql/data, VOLUME /var/lib/postgresql/data
@@ -36,11 +40,10 @@ services:
     # PGDATA, и данные уедут в анонимный том, то есть потеряются при пересоздании.
     # Внутри _volume_db данные окажутся в подкаталоге 18/docker.
     volumes:
-      - ../_volume_db:/var/lib/postgresql
-      - ./pg_conf/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ./_volume_db:/var/lib/postgresql
+      - ./pg_conf/postgresql.conf:/etc/postgresql/postgresql.conf
 
-    # Свой конфиг вместо сгенерированного initdb. ALTER SYSTEM пишет
-    # в postgresql.auto.conf внутри PGDATA, так что :ro выше ничего не ломает.
+    # Свой конфиг вместо сгенерированного initdb
     command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
 
     # $$ экранирует подстановку compose: переменные берутся из окружения

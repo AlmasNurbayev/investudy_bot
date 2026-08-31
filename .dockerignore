@@ -12,7 +12,12 @@ _*
 .git
 .gitignore
 .dockerignore
+docker-compose.yml
 docker-compose.local.yml
+
+# Конфиг Postgres для стенда: он монтируется в контейнер базы, а не копируется
+# в образ с бинарниками.
+pg_conf/
 
 # Не нужно для сборки бинарников
 .github/
