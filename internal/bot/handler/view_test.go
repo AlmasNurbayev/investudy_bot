@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-telegram/bot/models"
 	"github.com/guregu/null/v6"
 	"github.com/jackc/pgx/v5/pgtype"
 
@@ -241,5 +242,29 @@ func TestFirstMessageCarriesData(t *testing.T) {
 	first := renderClosed(rep)[0]
 	if !strings.Contains(first, "<pre>") {
 		t.Error("первое сообщение ушло с одной шапкой, без таблицы")
+	}
+}
+
+// Reply-клавиатура предыдущей версии бота живёт на клиенте и переживает смену
+// бота: снять её можно только явной разметкой, а прицепить её удаётся лишь
+// к сообщениям без инлайн-кнопок — на сообщение приходится один reply_markup.
+func TestPlainMessagesRemoveStaleKeyboard(t *testing.T) {
+	got := orRemoveKeyboard(nil)
+
+	remove, ok := got.(*models.ReplyKeyboardRemove)
+	if !ok {
+		t.Fatalf("разметка = %T, want *models.ReplyKeyboardRemove", got)
+	}
+	if !remove.RemoveKeyboard {
+		t.Error("remove_keyboard=false — чужие кнопки останутся на экране")
+	}
+}
+
+// А своя инлайн-клавиатура снятием не подменяется: иначе выбор периода исчез бы.
+func TestInlineKeyboardSurvives(t *testing.T) {
+	markup := &models.InlineKeyboardMarkup{}
+
+	if got := orRemoveKeyboard(markup); got != models.ReplyMarkup(markup) {
+		t.Errorf("инлайн-клавиатура подменена на %T", got)
 	}
 }

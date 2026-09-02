@@ -117,10 +117,26 @@ func send(ctx context.Context, b *bot.Bot, chatID int64, text string, markup mod
 		ChatID:      chatID,
 		Text:        text,
 		ParseMode:   models.ParseModeHTML,
-		ReplyMarkup: markup,
+		ReplyMarkup: orRemoveKeyboard(markup),
 	})
 	if err != nil {
 		// Сообщение не ушло — жаловаться больше некуда, кроме лога.
 		logger.ERROR("send message", "chat", chatID, "err", err)
 	}
+}
+
+// orRemoveKeyboard подставляет снятие reply-клавиатуры вместо пустой разметки.
+//
+// Бот работает инлайн-кнопками и своей reply-клавиатуры не заводит, но она
+// хранится на клиенте для конкретного чата и переживает смену бота: кнопки,
+// поставленные предыдущей версией, остаются внизу экрана навсегда, пока их
+// не снимут явно. Одного reply_markup на сообщение хватает только на что-то
+// одно, поэтому снятие цепляется к сообщениям без инлайн-клавиатуры — их бот
+// шлёт при первом же обращении, так что чужие кнопки уходят сами.
+func orRemoveKeyboard(markup models.ReplyMarkup) models.ReplyMarkup {
+	if markup != nil {
+		return markup
+	}
+
+	return &models.ReplyKeyboardRemove{RemoveKeyboard: true}
 }

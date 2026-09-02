@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	tg "github.com/go-telegram/bot"
-	tgmodels "github.com/go-telegram/bot/models"
+	"github.com/go-telegram/bot/models"
 
 	"investudy_bot/internal/bot/handler"
 	"investudy_bot/internal/config"
@@ -19,6 +19,18 @@ import (
 // Users — белый список доступа (реализуется internal/repository.Reader).
 type Users interface {
 	UserAllowed(ctx context.Context, telegramID int64) (bool, error)
+}
+
+// commands перечисляет команды бота.
+//
+// Отдельной функцией, а не литералом внутри New: так список можно проверить
+// тестом, тогда как New ходит в сеть за getMe и в тестах недоступен.
+func commands(closed *handler.ClosedReports) []command {
+	return []command{{
+		name:        handler.Command,
+		description: handler.CommandDescription,
+		handle:      closed.Menu,
+	}}
 }
 
 // command — команда бота: одна запись на маршрутизацию и на меню Telegram.
@@ -45,12 +57,7 @@ func New(cfg config.TelegramConfig, reports *report.Service, users Users) (*Bot,
 	b := &Bot{users: users, adminID: cfg.AdminID}
 
 	closed := handler.NewClosedReports(reports)
-
-	b.commands = []command{{
-		name:        handler.Command,
-		description: handler.CommandDescription,
-		handle:      closed.Menu,
-	}}
+	b.commands = commands(closed)
 
 	api, err := tg.New(cfg.Token,
 		tg.WithMiddlewares(b.allowed),
@@ -97,31 +104,67 @@ func (b *Bot) Run(ctx context.Context) error {
 // делает меню производным от кода, а не отдельной настройкой, которую надо
 // не забыть поправить.
 //
+// Публикуется в две области, и это не перестраховка. Telegram выбирает первый
+// установленный список в порядке от узкого к широкому:
+//
+//	chat+язык → chat → all_private_chats+язык → all_private_chats →
+//	default+язык → default
+//
+// Одна только default — последняя в очереди, и её перекрывает что угодно выше,
+// в том числе список, заведённый под конкретный язык клиента, и в том числе
+// пустой: меню тогда выглядит пустым, а публикация молча не действует.
+// all_private_chats выигрывает у обеих default-записей и покрывает личные чаты,
+// где ботом и пользуются; default остаётся для всего остального.
+//
 // Неудача бота не останавливает: меню — удобство, а не условие работы.
 func (b *Bot) publishCommands(ctx context.Context) {
-	commands := make([]tgmodels.BotCommand, 0, len(b.commands))
+	menu := b.menu()
+
+	scopes := map[string]models.BotCommandScope{
+		"all_private_chats": &models.BotCommandScopeAllPrivateChats{},
+		"default":           &models.BotCommandScopeDefault{},
+	}
+
+	for name, scope := range scopes {
+		_, err := b.api.SetMyCommands(ctx, &tg.SetMyCommandsParams{
+			Commands: menu,
+			Scope:    scope,
+		})
+		if err != nil {
+			logger.ERROR("publish commands", "scope", name, "err", err)
+
+			continue
+		}
+
+		// Имена пишутся в лог, а не только их число: если меню в клиенте
+		// выглядит не так, первый вопрос — что бот отправил, и ответ должен
+		// быть в логе, а не добываться запросом к API.
+		logger.INF("commands published", "scope", name, "commands", commandNames(menu))
+	}
+}
+
+func commandNames(menu []models.BotCommand) string {
+	names := make([]string, 0, len(menu))
+	for _, m := range menu {
+		names = append(names, m.Command)
+	}
+
+	return strings.Join(names, ", ")
+}
+
+// menu переводит таблицу команд в вид, который ждёт Telegram.
+func (b *Bot) menu() []models.BotCommand {
+	out := make([]models.BotCommand, 0, len(b.commands))
 	for _, c := range b.commands {
-		commands = append(commands, tgmodels.BotCommand{
-			// Telegram ждёт имя без ведущей косой черты.
+		out = append(out, models.BotCommand{
+			// Telegram отвергает имя с ведущей косой чертой, а RegisterHandler
+			// без неё команду не поймает — отсюда и разные написания.
 			Command:     strings.TrimPrefix(c.name, "/"),
 			Description: c.description,
 		})
 	}
 
-	_, err := b.api.SetMyCommands(ctx, &tg.SetMyCommandsParams{
-		Commands: commands,
-		// Область по умолчанию и без языка: в неё пишет BotFather, и она же
-		// видна всем, у кого нет более узкой. Узкие области бот не заводит,
-		// поэтому затирать их нечем и незачем.
-		Scope: &tgmodels.BotCommandScopeDefault{},
-	})
-	if err != nil {
-		logger.ERROR("publish commands", "err", err)
-
-		return
-	}
-
-	logger.INF("commands published", "count", len(commands))
+	return out
 }
 
 // allowed — проверка доступа перед любым обработчиком.
@@ -129,7 +172,7 @@ func (b *Bot) publishCommands(ctx context.Context) {
 // Middleware, а не проверка внутри каждого хендлера: забыть её в новой команде
 // проще простого, и цена забывчивости — финансовые данные постороннему.
 func (b *Bot) allowed(next tg.HandlerFunc) tg.HandlerFunc {
-	return func(ctx context.Context, api *tg.Bot, update *tgmodels.Update) {
+	return func(ctx context.Context, api *tg.Bot, update *models.Update) {
 		user := sender(update)
 		if user == 0 {
 			return
@@ -161,13 +204,13 @@ func (b *Bot) allowed(next tg.HandlerFunc) tg.HandlerFunc {
 	}
 }
 
-func (b *Bot) unknown(ctx context.Context, _ *tg.Bot, update *tgmodels.Update) {
+func (b *Bot) unknown(ctx context.Context, _ *tg.Bot, update *models.Update) {
 	b.reply(ctx, update, "Не знаю такой команды. Доступен "+handler.Command)
 }
 
 // sender достаёт автора апдейта. Апдейты без пользователя (правки каналов,
 // служебные) до обработчиков не доходят вовсе.
-func sender(update *tgmodels.Update) int64 {
+func sender(update *models.Update) int64 {
 	switch {
 	case update.Message != nil:
 		return update.Message.From.ID
@@ -178,7 +221,7 @@ func sender(update *tgmodels.Update) int64 {
 	return 0
 }
 
-func chat(update *tgmodels.Update) int64 {
+func chat(update *models.Update) int64 {
 	switch {
 	case update.Message != nil:
 		return update.Message.Chat.ID
@@ -189,13 +232,20 @@ func chat(update *tgmodels.Update) int64 {
 	return 0
 }
 
-func (b *Bot) reply(ctx context.Context, update *tgmodels.Update, text string) {
+func (b *Bot) reply(ctx context.Context, update *models.Update, text string) {
 	id := chat(update)
 	if id == 0 {
 		return
 	}
 
-	if _, err := b.api.SendMessage(ctx, &tg.SendMessageParams{ChatID: id, Text: text}); err != nil {
+	_, err := b.api.SendMessage(ctx, &tg.SendMessageParams{
+		ChatID: id,
+		Text:   text,
+		// Заодно снимает reply-клавиатуру, оставшуюся от предыдущей версии
+		// бота: своей он не заводит, а чужая живёт на клиенте до явного снятия.
+		ReplyMarkup: &models.ReplyKeyboardRemove{RemoveKeyboard: true},
+	})
+	if err != nil {
 		logger.ERROR("send message", "chat", id, "err", err)
 	}
 }
