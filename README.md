@@ -1,0 +1,16 @@
+## О проекте
+
+Telegram-бот, отдающий пользователям финансовую информацию. Данные идут по цепочке Google Sheets → PostgreSQL → Telegram-бот (Go).
+
+Четыре бинарника, один общий Docker-образ:
+
+| Бинарник | Роль | Как живёт |
+| --- | --- | --- |
+| **cmd/parser/** | загрузка среза из Google Sheets в PostgreSQL | одноразовый, запускается кроном |
+| **cmd/migrator/** | миграции БД (golang-migrate) | одноразовый, стартует до сервисов |
+| **cmd/prunedb/** | чистка истории снепшотов (`-scheme monthly`) | одноразовый, запускается кроном |
+| **cmd/bot/** | Telegram-бот, читает из PostgreSQL | демон |
+
+## TODO
+
+[ ] - Выдачу /closed_reports изменить на rich messages

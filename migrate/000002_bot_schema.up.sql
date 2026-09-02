@@ -47,6 +47,6 @@ CREATE TABLE IF NOT EXISTS settings (
 -- в сводке они дают вторую половину той же суммы и ломают итоги.
 INSERT INTO settings (key, value, description) VALUES (
     'closed_reports',
-    '{"excluded_items": ["пополнение", "перевод", "пополнение на оператора", "движение денег"]}',
+    '{"excluded_items": ["пополнение", "перевод", "перевод на оператора", "движение денег"]}',
     'Отчёт /closed_reports: статьи, исключаемые из сводки'
 ) ON CONFLICT (key) DO NOTHING;

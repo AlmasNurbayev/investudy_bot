@@ -22,6 +22,9 @@ import (
 // Command — команда, открывающая отчёт.
 const Command = "/closed_reports"
 
+// CommandDescription — подпись команды в меню Telegram.
+const CommandDescription = "Отчёты по закрытым периодам"
+
 // CallbackPrefix отличает нажатия кнопок этого отчёта от чужих: обработчик
 // callback'ов ловится по префиксу, а не по полному совпадению.
 const CallbackPrefix = "closed:"
