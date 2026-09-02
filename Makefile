@@ -31,6 +31,10 @@ help: ## показать список целей
 dev-parser: ## один прогон парсера (загрузка среза из Google Sheets)
 	go run ./cmd/parser
 
+.PHONY: dev-bot
+dev-bot: ## запустить бота локально (демон, до Ctrl+C)
+	go run ./cmd/bot
+
 .PHONY: migrate-up
 migrate-up: ## накатить миграции
 	go run ./cmd/migrator -typeTask up

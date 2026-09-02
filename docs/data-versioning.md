@@ -95,9 +95,38 @@ WHERE d.snapshot_id = (SELECT id FROM snapshots ORDER BY taken_at DESC LIMIT 1);
 транзакции, что и залив, поэтому до `COMMIT` она невидима другим сессиям — недостроенный срез
 не может стать «текущим» физически.
 
-Бот читает **только `data_current`** — его запросы выглядят так, будто версионирования нет, и
-забыть фильтр невозможно. Веб-отчёт, которому нужна произвольная версия, читает `data` с явным
-`snapshot_id`.
+### Какая версия считается рабочей
+
+Вью прибита к новейшему срезу по `taken_at` **безусловно** — в том числе к пустому. Это её
+предел: если очередной прогон парсера записал версию без строк, `data_current` отдаст пустоту,
+и отчёт покажет, что данных нет, хотя вчерашние на месте.
+
+Поэтому рабочая версия — **новейшая непустая**, и определяет её `internal/lib/snapshot`:
+
+```go
+// Usable — заливка дописана и строки есть.
+func Usable(s model.Snapshot) bool { return s.RowCount.Valid && s.RowCount.Int64 > 0 }
+
+// Latest — первая пригодная из списка, отсортированного по taken_at DESC.
+func Latest(snapshots []model.Snapshot) (model.Snapshot, error)
+```
+
+Правило лежит в отдельном пакете, а не в репозитории, чтобы читатели не расходились в ответе:
+бот и будущий веб-отчёт зовут одну функцию. Сверять `row_count` с реальным `count(*)` не нужно —
+`prunedb` уносит строки вместе с версией через `ON DELETE CASCADE`, полупустых срезов не бывает.
+
+Что показана не самая свежая версия, читатель узнаёт из шапки отчёта (`ClosedReport.Stale`):
+молча подменённые данные выглядят как исправные, и расхождение всплывёт не здесь.
+
+### Кто как читает
+
+Читающий код обращается к `data` **только через разрешённый `snapshot_id`** — он обязательный
+параметр каждого метода `Reader`, поэтому забыть версию невозможно, а разрешается она в одном
+месте. Первоначальная формулировка «бот читает только `data_current`» преследовала ровно эту
+цель и заменена на более сильную: вью не умеет пропускать пустой срез.
+
+`data_current` остаётся для ручных запросов из `docs/queries.md` — там короткий путь к текущей
+версии дороже устойчивости к пустой заливке.
 
 ### Справочники не версионируются
 
@@ -191,13 +220,18 @@ type SnapshotStore interface {
 
 ```go
 type Reader interface {
-    LatestSnapshot(ctx context.Context) (model.Snapshot, error)
-    // для селектора версии: year/month/week приходят готовыми, без вычислений на стороне Go
+    // для селектора версии и для выбора рабочей: year/month/week приходят
+    // готовыми, без вычислений на стороне Go
     ListSnapshots(ctx context.Context, limit int) ([]model.Snapshot, error)
-    // snapshotID == 0 → data_current; иначе конкретная версия. Один метод на оба случая.
-    Report(ctx context.Context, snapshotID int64, f model.Filter) ([]model.Aggregate, error)
+    // версия — обязательный параметр: забыть фильтр невозможно
+    ClosedReport(ctx context.Context, snapshotID int64, from, to time.Time, excluded []string) ([]model.ReportRow, error)
 }
 ```
+
+Реализован в `internal/repository/reader.go`. `LatestSnapshot` не понадобился: рабочую версию
+выбирает `snapshot.Latest` из `ListSnapshots`, и отдельный запрос «самый свежий» дал бы
+неправильный ответ на пустом срезе. Обобщённый `Report(snapshotID, model.Filter)` отложен до
+веб-отчёта — боту нужен один разрез, и заводить под него конструктор фильтров рано.
 
 Сравнение версий одного периода — не отдельный слой, а тот же `Report` с группировкой по версии:
 
@@ -216,8 +250,10 @@ GROUP BY snapshot_id, item_id;
 ## Файлы
 
 - `migrate/000001_init_schema.up.sql` / `.down.sql` — схема целиком
-- `parser/internal/repo/` — реализация `SnapshotStore` (+ upsert справочников)
-- `parser/internal/sheets/` — фетч листа (пока не существует)
+- `internal/repository/repository.go` — реализация `SnapshotStore` (+ upsert справочников)
+- `internal/repository/reader.go` — чтение отчётов
+- `internal/lib/snapshot/` — правило «какая версия рабочая»
+- `internal/sheets/` — фетч листа
 - `cmd/parser/main.go` — один прогон «снепшот → залив → publish → prune» и выход
 - `cmd/prunedb/main.go` — чистка истории по схеме
 - `CLAUDE.md` — раздел про версионирование, обновлённая таблица env

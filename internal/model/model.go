@@ -2,6 +2,7 @@ package model
 
 import (
 	"github.com/guregu/null/v6"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // Row — одна проводка листа ДДС в том виде, в каком она ложится в таблицу data.
@@ -56,4 +57,43 @@ type Snapshot struct {
 	Year     int
 	Month    int
 	Week     int
+}
+
+// ReportRow — строка сводной таблицы: один разрез подразделение → статья →
+// подстатья с итогами по дебету и кредиту.
+//
+// Разрезы приходят строками, а не id: отчёт их только печатает, а искать по
+// ним нечего. Пустое значение справочника уже заменено прочерком в запросе.
+//
+// Суммы — pgtype.Numeric, а не null.Float, в отличие от Row: там числа приехали
+// из листа через float64 и точнее уже не станут, а здесь их посчитал Postgres
+// точной десятичной арифметикой, и переводить результат в двоичную дробь ради
+// печати значило бы вносить погрешность на ровном месте.
+type ReportRow struct {
+	Division string
+	Item     string
+	SubItem  string
+	Debet    pgtype.Numeric
+	Credit   pgtype.Numeric
+}
+
+// ClosedReportsSettings — настройка отчёта из таблицы settings (ключ closed_reports).
+type ClosedReportsSettings struct {
+	// ExcludedItems — статьи, не попадающие в сводку: внутреннее движение
+	// денег, которое иначе задваивает итоги.
+	ExcludedItems []string `json:"excluded_items"`
+}
+
+// ClosedReport — готовый отчёт по закрытому периоду.
+type ClosedReport struct {
+	Title string
+	// Snapshot — версия среза, по которой отчёт фактически посчитан.
+	Snapshot Snapshot
+	// Stale — использован не новейший срез: последняя загрузка оказалась
+	// пустой. Читатель должен об этом знать: молча показанные вчерашние
+	// данные выглядят как исправные сегодняшние.
+	Stale       bool
+	Rows        []ReportRow
+	TotalDebet  pgtype.Numeric
+	TotalCredit pgtype.Numeric
 }

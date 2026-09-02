@@ -106,6 +106,27 @@ func (c PostgresConfig) dsn(scheme string) string {
 	return u.String()
 }
 
+// BotConfig — настройки бота: база и доступы в Telegram.
+//
+// Списка разрешённых пользователей здесь нет намеренно: он лежит в таблице
+// users, потому что доступ выдают и отзывают чаще, чем перезапускают сервис.
+type BotConfig struct {
+	Postgres PostgresConfig
+	Telegram TelegramConfig
+}
+
+// LoadBot читает настройки бота. Load потребовал бы ещё и доступы к Google
+// Sheets, которых у бота нет и быть не должно: пишет в базу только парсер.
+func LoadBot() (BotConfig, error) {
+	var cfg BotConfig
+
+	if err := env.Parse(&cfg); err != nil {
+		return BotConfig{}, err
+	}
+
+	return cfg, nil
+}
+
 // LoadPostgres читает только настройки БД. Мигратору не нужны ни доступы
 // к Google Sheets, ни токен бота, а Load потребовал бы их все.
 func LoadPostgres() (PostgresConfig, error) {

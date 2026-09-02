@@ -75,13 +75,14 @@ jobs:
           DB_TIMEOUT: 30s
         run: go run ./cmd/migrator -typeTask up
 
-      # -race сюда не добавлен намеренно: он требует cgo, а разделяемого состояния
-      # между горутинами в коде пока нет. Появится — включить, на ubuntu-runner'е
-      # cgo доступен из коробки.
+      # -race включён с появлением бота: он обрабатывает апдейты параллельно
+      # и делит между горутинами пул соединений, то есть ровно тот случай,
+      # ради которого детектор и нужен. Требует cgo — на ubuntu-runner'е он
+      # доступен из коробки.
       - name: Test
         env:
           TEST_DATABASE_URL: postgres://postgres:test@localhost:5432/investudy
-        run: go test ./...
+        run: go test -race ./...
 
   docker:
     needs: [lint, test]
