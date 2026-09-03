@@ -257,7 +257,7 @@ func TestClosedReportsSettingsComeFromMigration(t *testing.T) {
 
 	want := map[string]bool{
 		"пополнение": true, "перевод": true,
-		"пополнение на оператора": true, "движение денег": true,
+		"перевод на оператора": true, "движение денег": true,
 	}
 	if len(cfg.ExcludedItems) != len(want) {
 		t.Fatalf("исключений %d, want %d: %v", len(cfg.ExcludedItems), len(want), cfg.ExcludedItems)
