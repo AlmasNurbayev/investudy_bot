@@ -50,6 +50,48 @@ func TestTelegramRequired(t *testing.T) {
 	}
 }
 
+// Ключ сервис-аккаунта задаётся ровно одним способом. Ни одного — парсеру
+// нечем ходить в Sheets; оба — в конфиге два разных ключа, и молчаливый выбор
+// победителя увёл бы загрузку в чужую таблицу.
+func TestCredentialsSource(t *testing.T) {
+	cases := []struct {
+		name       string
+		credential string
+		file       string
+		err        bool
+	}{
+		{name: "file only", file: "/creds.json"},
+		{name: "value only", credential: `{"type":"service_account"}`},
+		{name: "neither", err: true},
+		{name: "both", credential: `{"type":"service_account"}`, file: "/creds.json", err: true},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			fill(t)
+			t.Setenv("GOOGLE_CREDENTIALS_FILE", c.file)
+			t.Setenv("GOOGLE_CREDENTIALS", c.credential)
+
+			cfg, err := Load()
+
+			if c.err {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.Sheets.CredentialsFile != c.file || cfg.Sheets.Credentials != c.credential {
+				t.Fatalf("credentials = %q / file = %q, want %q / %q",
+					cfg.Sheets.Credentials, cfg.Sheets.CredentialsFile, c.credential, c.file)
+			}
+		})
+	}
+}
+
 func fill(t *testing.T) {
 	t.Helper()
 

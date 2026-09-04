@@ -2,6 +2,7 @@ package sheets
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -117,9 +118,9 @@ type serviceAccount struct {
 }
 
 func New(ctx context.Context, cfg config.SheetsConfig) (*Client, error) {
-	raw, err := os.ReadFile(cfg.CredentialsFile)
+	raw, err := credentials(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("read credentials: %w", err)
+		return nil, err
 	}
 
 	var sa serviceAccount
@@ -154,6 +155,45 @@ func New(ctx context.Context, cfg config.SheetsConfig) (*Client, error) {
 		minPeriod:     cfg.MinPeriod.Time,
 	}, nil
 }
+
+// credentials достаёт ключ сервис-аккаунта из того источника, который задан:
+// значение переменной или файл. Что задан ровно один, проверил config.
+//
+// В переменной ключ лежит либо голым JSON, либо его base64. Различаем по первому
+// символу, а не подбором: JSON ключа — всегда объект, а base64 объекта с него
+// начаться не может. Гадание «сначала попробуем декодировать» на обрезанном
+// значении дало бы мусор вместо внятного «parse credentials».
+func credentials(cfg config.SheetsConfig) ([]byte, error) {
+	if cfg.Credentials == "" {
+		raw, err := os.ReadFile(cfg.CredentialsFile)
+		if err != nil {
+			return nil, fmt.Errorf("read credentials: %w", err)
+		}
+
+		return raw, nil
+	}
+
+	value := strings.TrimSpace(cfg.Credentials)
+	if strings.HasPrefix(value, "{") {
+		return []byte(value), nil
+	}
+
+	// base64 из разных источников приезжает по-разному: `base64` без -w0 рвёт
+	// строку переносами, а часть инструментов отдаёт результат без выравнивания.
+	// Ни то, ни другое не повод отказать — расхождение чисто в оформлении.
+	value = stripSpace.Replace(value)
+
+	raw, err := base64.StdEncoding.DecodeString(value)
+	if err != nil {
+		if raw, err = base64.RawStdEncoding.DecodeString(value); err != nil {
+			return nil, fmt.Errorf("decode credentials: expected service account JSON or its base64: %w", err)
+		}
+	}
+
+	return raw, nil
+}
+
+var stripSpace = strings.NewReplacer("\n", "", "\r", "", " ", "", "\t", "")
 
 type valuesResponse struct {
 	Values [][]any `json:"values"`

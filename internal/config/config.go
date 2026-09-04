@@ -17,12 +17,42 @@ type Config struct {
 }
 
 type SheetsConfig struct {
-	SpreadsheetID   string `env:"SPREADSHEET_ID,required,notEmpty"`
-	SheetName       string `env:"SHEET_NAME,required,notEmpty"`
-	CredentialsFile string `env:"GOOGLE_CREDENTIALS_FILE,required,notEmpty"`
+	SpreadsheetID string `env:"SPREADSHEET_ID,required,notEmpty"`
+	SheetName     string `env:"SHEET_NAME,required,notEmpty"`
+
+	// Ключ сервис-аккаунта задаётся ровно одним из двух способов.
+	//
+	// Credentials — сам ключ значением переменной: так контейнеру не нужен
+	// bind-mount ради одного файла, а секрет едет тем же путём, что пароль базы
+	// и токен бота. Принимается и голый JSON, и его base64: JSON лезет в .env
+	// одной строкой (переносы внутри private_key экранированы самим форматом),
+	// но кавычки и обратные слэши переживают не каждый разборщик .env, а base64
+	// не содержит ничего, что мог бы съесть make, compose или шелл.
+	//
+	// CredentialsFile — путь к файлу, как раньше: на машине разработчика ключ
+	// уже лежит файлом, и перекладывать его в .env ради одного прогона незачем.
+	Credentials     string `env:"GOOGLE_CREDENTIALS"`
+	CredentialsFile string `env:"GOOGLE_CREDENTIALS_FILE"`
+
 	// MinPeriod — нижняя граница загрузки: строки с period раньше этой даты
 	// не грузятся вовсе. Необязательная: пустое значение означает «грузить всё».
 	MinPeriod SheetDate `env:"MIN_PERIOD"`
+}
+
+// validate проверяет, что источник ключа ровно один.
+//
+// Оба разом — не «одно перекрывает другое», а ошибка: два ключа в конфиге
+// означают, что кто-то правил не тот, и молчаливый выбор победителя увёл бы
+// парсер в чужую таблицу. Ни одного — сразу, а не при первом обращении к Sheets.
+func (c SheetsConfig) validate() error {
+	switch {
+	case c.Credentials == "" && c.CredentialsFile == "":
+		return fmt.Errorf("set GOOGLE_CREDENTIALS (service account key itself, JSON or its base64) or GOOGLE_CREDENTIALS_FILE (path to it)")
+	case c.Credentials != "" && c.CredentialsFile != "":
+		return fmt.Errorf("GOOGLE_CREDENTIALS and GOOGLE_CREDENTIALS_FILE are both set, keep one")
+	}
+
+	return nil
 }
 
 // TelegramConfig — доступы бота. Парсеру они нужны не для чтения апдейтов,
@@ -145,6 +175,12 @@ func Load() (Config, error) {
 	// env.Parse собирает все проблемы разом, а не падает на первой,
 	// поэтому недостающие переменные видно одним списком.
 	if err := env.Parse(&cfg); err != nil {
+		return Config{}, err
+	}
+
+	// Взаимоисключающие переменные тегами env не выражаются: required повесить
+	// нельзя ни на одну из двух, поэтому проверка идёт отдельным шагом.
+	if err := cfg.Sheets.validate(); err != nil {
 		return Config{}, err
 	}
 

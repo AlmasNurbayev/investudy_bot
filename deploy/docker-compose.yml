@@ -52,10 +52,10 @@ services:
       POSTGRES_PORT: 5432
       TZ: Asia/Almaty
     command: ["sh", "-c", "/app/migrator -typeTask up && exec /app/bot"]
-    
-    # положить туда JSON
-    volumes:
-     - ./_volume_assets:/app/_volume_assets
+
+    # Тома нет намеренно: ключ сервис-аккаунта приезжает переменной
+    # GOOGLE_CREDENTIALS (JSON или его base64) из того же .env, что и остальные
+    # секреты, поэтому монтировать файл внутрь контейнера незачем.
 
     depends_on:
       postgres:

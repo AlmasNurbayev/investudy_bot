@@ -1,12 +1,17 @@
 package sheets
 
 import (
+	"encoding/base64"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/guregu/null/v6"
+
+	"investudy_bot/internal/config"
 )
 
 func TestParseNum(t *testing.T) {
@@ -293,4 +298,71 @@ func TestParseRowsFailsOnBrokenRowWithDate(t *testing.T) {
 	if _, _, err := parseRows(values, parseOpts{sheet: "ДДС"}); err == nil {
 		t.Fatal("expected error for a dated row with a broken amount")
 	}
+}
+
+// Ключ сервис-аккаунта приезжает либо файлом, либо значением переменной —
+// голым JSON или его base64. Все три пути обязаны дать одни и те же байты:
+// иначе выбор способа доставки менял бы поведение парсера.
+func TestCredentials(t *testing.T) {
+	const key = `{"type":"service_account","client_email":"a@b.iam.gserviceaccount.com"}`
+
+	path := filepath.Join(t.TempDir(), "creds.json")
+	if err := os.WriteFile(path, []byte(key), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name string
+		cfg  config.SheetsConfig
+		err  bool
+	}{
+		{name: "file", cfg: config.SheetsConfig{CredentialsFile: path}},
+		{name: "plain json", cfg: config.SheetsConfig{Credentials: key}},
+		{name: "json with surrounding whitespace", cfg: config.SheetsConfig{Credentials: "\n  " + key + "\n"}},
+		{
+			name: "base64",
+			cfg:  config.SheetsConfig{Credentials: base64.StdEncoding.EncodeToString([]byte(key))},
+		},
+		{
+			// `base64` без -w0 рвёт вывод переносами: оформление, а не другой ключ.
+			name: "base64 wrapped in lines",
+			cfg: config.SheetsConfig{Credentials: strings.Join(
+				chunks(base64.StdEncoding.EncodeToString([]byte(key)), 24), "\n")},
+		},
+		{
+			name: "base64 without padding",
+			cfg:  config.SheetsConfig{Credentials: base64.RawStdEncoding.EncodeToString([]byte(key))},
+		},
+		{name: "neither base64 nor json", cfg: config.SheetsConfig{Credentials: "не ключ"}, err: true},
+		{name: "missing file", cfg: config.SheetsConfig{CredentialsFile: path + ".nope"}, err: true},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := credentials(c.cfg)
+
+			if c.err {
+				if err == nil {
+					t.Fatalf("credentials: expected error, got %q", got)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("credentials: unexpected error: %v", err)
+			}
+			if string(got) != key {
+				t.Fatalf("credentials = %q, want %q", got, key)
+			}
+		})
+	}
+}
+
+func chunks(s string, n int) []string {
+	var out []string
+	for len(s) > n {
+		out, s = append(out, s[:n]), s[n:]
+	}
+
+	return append(out, s)
 }
