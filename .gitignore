@@ -7,4 +7,5 @@ docker-compose.yml
 # и собранные бинарники (make build). Те же исключены из контекста Docker
 # правилом _* в .dockerignore.
 _volume_db/
+_volume_assets/
 _bin/

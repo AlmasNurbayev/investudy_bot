@@ -52,6 +52,10 @@ services:
       POSTGRES_PORT: 5432
       TZ: Asia/Almaty
     command: ["sh", "-c", "/app/migrator -typeTask up && exec /app/bot"]
+    
+    # положить туда JSON
+    volumes:
+     - ./_volume_assets:/app/_volume_assets
 
     depends_on:
       postgres:
