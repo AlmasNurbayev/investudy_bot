@@ -15,30 +15,12 @@ services:
     env_file:
       - ./.env
 
-    # Без кавычек: `TZ='Asia/Almaty'` — это один YAML-скаляр, кавычки попали бы
-    # внутрь значения, имя зоны стало бы невалидным и молча откатилось на UTC.
     environment:
       - TZ=Asia/Almaty
-
-    # Порт публикуется только на loopback: база нужна парсеру, который пока
-    # запускается на хосте, но снаружи она быть доступна не должна.
-    # Когда парсер и бот переедут в этот compose, публикацию можно убрать —
-    # они найдут базу по имени сервиса во внутренней сети.
-    #
-    # Порт задан числом, а не через ${POSTGRES_PORT}: подстановка завела бы
-    # лишнюю связь ради значения, которое всё равно обязано совпадать
-    # с POSTGRES_PORT в .env. Менять порт — здесь, синхронно с .env.
     ports:
       - "5432:5432"
 
-    # Файлы базы лежат в _volume_db рядом с этим файлом (папка в .gitignore).
-    #
-    # ВНИМАНИЕ: в Postgres 18 каталог данных переехал.
-    #   17.x — PGDATA=/var/lib/postgresql/data, VOLUME /var/lib/postgresql/data
-    #   18.x — PGDATA=/var/lib/postgresql/18/docker, VOLUME /var/lib/postgresql
-    # Привычный по старым примерам монтаж на .../data в 18-й версии попадёт мимо
-    # PGDATA, и данные уедут в анонимный том, то есть потеряются при пересоздании.
-    # Внутри _volume_db данные окажутся в подкаталоге 18/docker.
+    # conf нужно создать ДО запуска контейнера
     volumes:
       - ./_volume_db:/var/lib/postgresql
       - ./pg_conf/postgresql.conf:/etc/postgresql/postgresql.conf
@@ -46,8 +28,6 @@ services:
     # Свой конфиг вместо сгенерированного initdb
     command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
 
-    # $$ экранирует подстановку compose: переменные берутся из окружения
-    # контейнера, а не интерполируются на этапе разбора файла.
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s
@@ -55,13 +35,27 @@ services:
       retries: 5
       start_period: 30s
 
-    # Postgres при остановке пишет контрольную точку; десяти секунд по умолчанию
-    # может не хватить, а kill -9 обернётся восстановлением при следующем старте.
     stop_grace_period: 1m
 
-    # Общая память по умолчанию — 64 МБ, этого мало параллельным запросам
-    # и объёмным сортировкам.
     shm_size: 256mb
+
+
+  bot:
+    image: "almasnurbayev/investudy_bot:latest"
+    restart: unless-stopped
+
+    env_file:
+      - ./.env
+
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      TZ: Asia/Almaty
+    command: ["sh", "-c", "/app/migrator -typeTask up && exec /app/bot"]
+
+    depends_on:
+      postgres:
+        condition: service_healthy    
 
 # Отдельного сервиса-мигратора здесь нет: схему накатывает сам сервис при старте
 # цепочкой в CMD образа (`/app/migrator -typeTask up && exec /app/parser`),
