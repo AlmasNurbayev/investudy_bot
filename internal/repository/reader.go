@@ -61,39 +61,6 @@ func (r *Reader) ListSnapshots(ctx context.Context, limit int) ([]model.Snapshot
 	return snapshots, nil
 }
 
-// closedReport — сводка по разрезам подразделение → статья → подстатья.
-//
-// Читается data с явным snapshot_id, а не вью data_current: она прибита
-// к новейшему срезу по taken_at безусловно, а отчёт показывает новейший
-// непустой. Забыть версию нельзя — она обязательный параметр метода.
-//
-// snapshot_id стоит в WHERE первым: под него и построен data_snapshot_period_idx
-// (snapshot_id, period), так что индекс отрабатывает целиком.
-//
-// Джойны левые: все FK в data nullable, и строка без аналитики обязана попасть
-// в сводку прочерком, а не исчезнуть — парсер такие строки специально считает
-// и докладывает администратору, прятать их в отчёте было бы непоследовательно.
-//
-// Исключения сравниваются по lower(): в настройках статья записана строчными,
-// в листе может оказаться с заглавной. Проверка на NULL обязательна —
-// NULL <> ALL (...) даёт NULL, и строки без статьи выпали бы из отчёта молча.
-const closedReport = `
-	SELECT coalesce(dv.name, '—') AS division,
-	       coalesce(it.name, '—') AS item,
-	       coalesce(si.name, '—') AS sub_item,
-	       coalesce(sum(d.debet), 0)  AS debet,
-	       coalesce(sum(d.credit), 0) AS credit
-	FROM data d
-	LEFT JOIN divisions dv ON dv.id = d.division_id
-	LEFT JOIN items     it ON it.id = d.item_id
-	LEFT JOIN sub_items si ON si.id = d.sub_item_id
-	WHERE d.snapshot_id = $1
-	  AND d.period >= $2
-	  AND d.period <  $3
-	  AND (it.name IS NULL OR lower(it.name) <> ALL ($4::text[]))
-	GROUP BY 1, 2, 3
-	ORDER BY 1, 2, 3`
-
 // ClosedReport считает сводку по периоду [from, to) внутри одной версии среза.
 //
 // Границы — полуинтервал: верхняя не входит, поэтому знать длину месяца
@@ -101,6 +68,37 @@ const closedReport = `
 func (r *Reader) ClosedReport(
 	ctx context.Context, snapshotID int64, from, to time.Time, excluded []string,
 ) ([]model.ReportRow, error) {
+	// Читается data с явным snapshot_id, а не вью data_current: она прибита
+	// к новейшему срезу по taken_at безусловно, а отчёт показывает новейший
+	// непустой. Забыть версию нельзя — она обязательный параметр метода.
+	//
+	// snapshot_id стоит в WHERE первым: под него и построен data_snapshot_period_idx
+	// (snapshot_id, period), так что индекс отрабатывает целиком.
+	//
+	// Джойны левые: все FK в data nullable, и строка без аналитики обязана попасть
+	// в сводку прочерком, а не исчезнуть — парсер такие строки специально считает
+	// и докладывает администратору, прятать их в отчёте было бы непоследовательно.
+	//
+	// Исключения сравниваются по lower(): в настройках статья записана строчными,
+	// в листе может оказаться с заглавной. Проверка на NULL обязательна —
+	// NULL <> ALL (...) даёт NULL, и строки без статьи выпали бы из отчёта молча.
+	const closedReport = `
+		SELECT coalesce(dv.name, '—') AS division,
+		       coalesce(it.name, '—') AS item,
+		       coalesce(si.name, '—') AS sub_item,
+		       coalesce(sum(d.debet), 0)  AS debet,
+		       coalesce(sum(d.credit), 0) AS credit
+		FROM data d
+		LEFT JOIN divisions dv ON dv.id = d.division_id
+		LEFT JOIN items     it ON it.id = d.item_id
+		LEFT JOIN sub_items si ON si.id = d.sub_item_id
+		WHERE d.snapshot_id = $1
+		  AND d.period >= $2
+		  AND d.period <  $3
+		  AND (it.name IS NULL OR lower(it.name) <> ALL ($4::text[]))
+		GROUP BY 1, 2, 3
+		ORDER BY 1, 2, 3`
+
 	// nil в text[] уходит как NULL, и тогда условие исключений даёт NULL
 	// на каждой строке — отчёт оказался бы пустым. Пустой срез даёт '{}'.
 	if excluded == nil {
