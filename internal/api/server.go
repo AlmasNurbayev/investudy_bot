@@ -3,8 +3,14 @@
 package api
 
 import (
+	"cmp"
+	"context"
 	"errors"
+	"fmt"
+	"net"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -26,22 +32,33 @@ var public = map[string]bool{
 
 const adminPrefix = "/api/admin/"
 
-// New собирает приложение.
-func New(h *handler.Handler, a *auth.Service) *fiber.App {
-	app := fiber.New(fiber.Config{
-		ErrorHandler: errorHandler,
-		// Маршрут совпадает только с путём буква в букву. Иначе /API/admin/users
-		// дошёл бы до админской ручки мимо проверки префикса /api/admin/ в
-		// session — права проверяются по пути, и путь обязан быть одним.
-		CaseSensitive: true,
-		StrictRouting: true,
-		// За nginx адрес клиента приходит заголовком. Верить ему можно только
-		// от своего прокси (loopback и частные сети compose), иначе любой
-		// подставил бы чужой адрес и обошёл ограничение попыток входа.
-		TrustProxy:       true,
-		TrustProxyConfig: fiber.TrustProxyConfig{Loopback: true, Private: true},
-		ProxyHeader:      "X-Real-IP",
-	})
+// Server — приложение и его остановка.
+//
+// Каждый запрос получает контекст от base с таймаутом запроса: запросы к базе
+// не висят дольше DB_TIMEOUT, а при остановке их можно прервать разом. Без
+// этого незавершённый запрос пережил бы Listen (fiber возвращается из него,
+// как только закрыт приёмник, не дожидаясь запросов), держал бы соединение,
+// и pool.Close в main ждал бы его сколько угодно — пока Docker не убьёт
+// процесс SIGKILL, — а сам запрос упал бы на закрытом пуле.
+type Server struct {
+	app     *fiber.App
+	timeout time.Duration
+
+	base  context.Context
+	abort context.CancelFunc
+	// inflight — запросы, которые ещё выполняются.
+	inflight sync.WaitGroup
+}
+
+// abortWait — сколько ждать прерванные запросы после отмены их контекста.
+// pgx на отмену шлёт Postgres CancelRequest и возвращается быстро; дольше
+// ждать значило бы упереться в SIGKILL от Docker.
+const abortWait = 2 * time.Second
+
+// New собирает приложение. requestTimeout — потолок одного запроса (DB_TIMEOUT).
+func New(h *handler.Handler, a *auth.Service, requestTimeout time.Duration) *Server {
+	s := newServer(requestTimeout)
+	app := s.app
 
 	app.Use(recoverer.New())
 	app.Use(accessLog)
@@ -62,7 +79,151 @@ func New(h *handler.Handler, a *auth.Service) *fiber.App {
 
 	oas.RegisterHandlers(app, oas.NewStrictHandler(h, nil))
 
-	return app
+	return s
+}
+
+// newServer — приложение с учётом запросов, но без маршрутов: на нём же
+// тестируется остановка.
+func newServer(requestTimeout time.Duration) *Server {
+	base, abort := context.WithCancel(context.Background())
+
+	s := &Server{timeout: requestTimeout, base: base, abort: abort}
+
+	s.app = fiber.New(fiber.Config{
+		ErrorHandler: errorHandler,
+		// Маршрут совпадает только с путём буква в букву. Иначе /API/admin/users
+		// дошёл бы до админской ручки мимо проверки префикса /api/admin/ в
+		// session — права проверяются по пути, и путь обязан быть одним.
+		CaseSensitive: true,
+		StrictRouting: true,
+		// За nginx адрес клиента приходит заголовком. Верить ему можно только
+		// от своего прокси (loopback и частные сети compose), иначе любой
+		// подставил бы чужой адрес и обошёл ограничение попыток входа.
+		TrustProxy:       true,
+		TrustProxyConfig: fiber.TrustProxyConfig{Loopback: true, Private: true},
+		ProxyHeader:      "X-Real-IP",
+		// Остановка не закрывает keep-alive соединения сама (ShutdownWithContext),
+		// поэтому простаивающее соединение не должно жить бесконечно.
+		IdleTimeout: 60 * time.Second,
+	})
+
+	// Первым: всё, что ниже, работает уже в контексте запроса.
+	s.app.Use(s.track)
+
+	return s
+}
+
+// App — приложение fiber; нужно тестам (app.Test).
+func (s *Server) App() *fiber.App { return s.app }
+
+// track считает запрос незавершённым до его конца и даёт ему контекст с
+// таймаутом, производный от base.
+func (s *Server) track(c fiber.Ctx) error {
+	s.inflight.Add(1)
+	defer s.inflight.Done()
+
+	ctx, cancel := context.WithTimeout(s.base, s.timeout)
+	defer cancel()
+
+	c.SetContext(ctx)
+
+	return c.Next()
+}
+
+// Run слушает addr до отмены ctx и останавливается штатно (см. serve).
+func (s *Server) Run(ctx context.Context, addr string, grace time.Duration) error {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", addr, err)
+	}
+
+	return s.serve(ctx, ln, grace)
+}
+
+// serve обслуживает ln до отмены ctx. Остановка:
+//
+//  1. приёмник закрывается — новых запросов нет;
+//  2. начатые запросы получают grace на то, чтобы закончиться самим;
+//  3. оставшиеся прерываются отменой контекста — запросы к базе отменяются;
+//  4. возврат — только когда запросов не осталось (или вышел abortWait),
+//     и лишь после этого main закрывает пул.
+func (s *Server) serve(ctx context.Context, ln net.Listener, grace time.Duration) error {
+	defer s.abort()
+
+	s.logRoutes()
+	logger.INF("api started", "addr", ln.Addr().String())
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- s.app.Listener(ln, fiber.ListenConfig{DisableStartupMessage: true}) }()
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+	}
+
+	logger.INF("api stopping", "grace", grace)
+
+	graceCtx, cancel := context.WithTimeout(context.Background(), grace)
+	defer cancel()
+
+	if err := s.app.ShutdownWithContext(graceCtx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+		logger.ERROR("api shutdown", "err", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		s.inflight.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-graceCtx.Done():
+		logger.WRN("api: запросы не уложились в остановку, прерываю", "grace", grace)
+		s.abort()
+
+		select {
+		case <-done:
+		case <-time.After(abortWait):
+			logger.ERROR("api: прерванные запросы не завершились", "wait", abortWait)
+		}
+	}
+
+	logger.INF("api stopped")
+
+	return nil
+}
+
+// logRoutes пишет в лог все маршруты: что именно слушает этот бинарник,
+// видно сразу при старте, без чтения кода и контракта.
+func (s *Server) logRoutes() {
+	routes := s.app.GetRoutes(true)
+
+	slices.SortFunc(routes, func(a, b fiber.Route) int {
+		return cmp.Or(cmp.Compare(a.Path, b.Path), cmp.Compare(a.Method, b.Method))
+	})
+
+	for _, r := range routes {
+		// HEAD fiber заводит сам к каждому GET — в логе это шум.
+		if r.Method == fiber.MethodHead {
+			continue
+		}
+
+		logger.INF("route", "method", r.Method, "path", r.Path, "access", routeAccess(r.Path))
+	}
+}
+
+// routeAccess — кому доступен маршрут, по тем же правилам, что в session.
+func routeAccess(path string) string {
+	switch {
+	case public[path]:
+		return "public"
+	case strings.HasPrefix(path, adminPrefix):
+		return "admin"
+	}
+
+	return "session"
 }
 
 // session — проверка сессии и прав. Кладёт в контекст пользователя и
@@ -115,6 +276,18 @@ func errorHandler(c fiber.Ctx, err error) error {
 		return c.Status(fe.Code).JSON(oas.Error{Message: fe.Message})
 	}
 
+	// Отмена и таймаут — не сбой кода: запрос прервала остановка сервера
+	// или он упёрся в DB_TIMEOUT. Клиенту — что повторить, в лог — без ERROR.
+	switch {
+	case errors.Is(err, context.Canceled):
+		logger.WRN("api: запрос прерван остановкой", "method", c.Method(), "path", c.Path())
+		return c.Status(fiber.StatusServiceUnavailable).JSON(oas.Error{Message: "Сервер перезапускается, повторите запрос"})
+
+	case errors.Is(err, context.DeadlineExceeded):
+		logger.WRN("api: запрос не уложился в таймаут", "method", c.Method(), "path", c.Path(), "err", err)
+		return c.Status(fiber.StatusGatewayTimeout).JSON(oas.Error{Message: "Запрос выполнялся слишком долго, повторите позже"})
+	}
+
 	logger.ERROR("api", "method", c.Method(), "path", c.Path(), "err", err)
 
 	return c.Status(fiber.StatusInternalServerError).JSON(oas.Error{Message: "Внутренняя ошибка сервера"})
@@ -126,12 +299,7 @@ func accessLog(c fiber.Ctx) error {
 
 	status := c.Response().StatusCode()
 	if err != nil {
-		var fe *fiber.Error
-		if errors.As(err, &fe) {
-			status = fe.Code
-		} else {
-			status = fiber.StatusInternalServerError
-		}
+		status = errorStatus(err)
 	}
 
 	logger.INF("http", "method", c.Method(), "path", c.Path(), "status", status, "took", time.Since(start).Round(time.Millisecond))
@@ -153,3 +321,20 @@ const swaggerUI = `<!doctype html>
 <script>SwaggerUIBundle({url: "/api/openapi.yaml", dom_id: "#ui", withCredentials: true});</script>
 </body>
 </html>`
+
+// errorStatus — код, которым errorHandler ответит на err: access-лог
+// пишется раньше, чем ответ собран.
+func errorStatus(err error) int {
+	var fe *fiber.Error
+
+	switch {
+	case errors.As(err, &fe):
+		return fe.Code
+	case errors.Is(err, context.Canceled):
+		return fiber.StatusServiceUnavailable
+	case errors.Is(err, context.DeadlineExceeded):
+		return fiber.StatusGatewayTimeout
+	}
+
+	return fiber.StatusInternalServerError
+}

@@ -75,7 +75,7 @@ func setup(t *testing.T) *env {
 	usersSvc := users.New(store)
 	h := handler.New(authSvc, usersSvc, report.New(repository.NewReader(pool)), store, false)
 
-	e := &env{t: t, app: api.New(h, authSvc), pool: pool, users: usersSvc}
+	e := &env{t: t, app: api.New(h, authSvc, 10*time.Second).App(), pool: pool, users: usersSvc}
 
 	if err = pool.QueryRow(ctx, `SELECT id FROM divisions WHERE name = 'отдел продаж'`).Scan(&e.sales); err != nil {
 		t.Fatalf("division: %v", err)

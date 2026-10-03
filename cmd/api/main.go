@@ -25,7 +25,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gofiber/fiber/v3"
 	"golang.org/x/term"
 
 	"investudy_bot/internal/access"
@@ -40,8 +39,10 @@ import (
 	"investudy_bot/internal/users"
 )
 
-// shutdownTimeout — сколько ждать незавершённые запросы при остановке.
-const shutdownTimeout = 10 * time.Second
+// shutdownGrace — сколько начатые запросы получают на то, чтобы закончиться
+// самим при остановке; потом они прерываются. С запасом меньше 10 секунд,
+// которые Docker ждёт после SIGTERM до SIGKILL.
+const shutdownGrace = 5 * time.Second
 
 func main() {
 	logger.Init(slog.LevelDebug)
@@ -90,23 +91,15 @@ func run(ctx context.Context, cfg config.APIConfig) error {
 	}
 
 	h := handler.New(authSvc, users.New(store), report.New(repository.NewReader(pool)), store, cfg.CookieSecure)
-	app := api.New(h, authSvc)
+	srv := api.New(h, authSvc, cfg.Postgres.Timeout)
 
 	if !cfg.CookieSecure {
 		logger.WRN("API_COOKIE_SECURE=false: cookie сессии уйдёт и по http — только для локального запуска")
 	}
 
-	logger.INF("api started", "addr", cfg.Addr)
-
-	err = app.Listen(cfg.Addr, fiber.ListenConfig{
-		DisableStartupMessage: true,
-		GracefulContext:       ctx,
-		ShutdownTimeout:       shutdownTimeout,
-	})
-
-	logger.INF("api stopped")
-
-	return err
+	// Пул закрывается отложенным вызовом выше — уже после того, как Run
+	// дождался или прервал все запросы: иначе Close ждал бы занятые соединения.
+	return srv.Run(ctx, cfg.Addr, shutdownGrace)
 }
 
 func runCreateAdmin(ctx context.Context, cfg config.APIConfig, login, username string, role access.Role) error {
