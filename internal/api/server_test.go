@@ -186,10 +186,12 @@ func TestRequestTimeout(t *testing.T) {
 
 func TestRouteAccess(t *testing.T) {
 	cases := map[string]string{
-		"/api/auth/login":  "public",
-		"/healthz":         "public",
-		"/api/admin/users": "admin",
-		"/api/pnl":         "session",
+		"/api/auth/login":   "public",
+		"/healthz":          "public",
+		"/api/docs":         "public",
+		"/api/openapi.yaml": "public",
+		"/api/admin/users":  "admin",
+		"/api/pnl":          "session",
 	}
 
 	for path, want := range cases {

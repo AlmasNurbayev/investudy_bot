@@ -91,7 +91,7 @@ func (h *Handler) Secure() bool { return h.secure }
 func (h *Handler) Login(ctx context.Context, req oas.LoginRequestObject) (oas.LoginResponseObject, error) {
 	c := clientFrom(ctx)
 
-	token, err := h.auth.Login(ctx, req.Body.Login, req.Body.Password, c.IP, c.UserAgent, h.now())
+	token, user, err := h.auth.Login(ctx, req.Body.Login, req.Body.Password, c.IP, c.UserAgent, h.now())
 
 	var tooMany auth.TooManyAttempts
 	switch {
@@ -112,7 +112,10 @@ func (h *Handler) Login(ctx context.Context, req oas.LoginRequestObject) (oas.Lo
 
 	cookie := SessionCookie(token, h.secure)
 
-	return oas.Login204Response{Headers: oas.Login204ResponseHeaders{SetCookie: &cookie}}, nil
+	return oas.Login200JSONResponse{
+		Body:    meDTO(user),
+		Headers: oas.Login200ResponseHeaders{SetCookie: &cookie},
+	}, nil
 }
 
 func (h *Handler) Logout(ctx context.Context, _ oas.LogoutRequestObject) (oas.LogoutResponseObject, error) {
@@ -139,9 +142,12 @@ func (r logoutResponse) VisitLogoutResponse(c fiber.Ctx) error {
 }
 
 func (h *Handler) GetMe(ctx context.Context, _ oas.GetMeRequestObject) (oas.GetMeResponseObject, error) {
-	u := mustUser(ctx)
+	return oas.GetMe200JSONResponse(meDTO(mustUser(ctx))), nil
+}
 
-	me := oas.GetMe200JSONResponse{
+// meDTO — пользователь и его граница доступа: ответ и входа, и /api/me.
+func meDTO(u model.User) oas.Me {
+	me := oas.Me{
 		Id:       u.ID,
 		Login:    u.Login.Ptr(),
 		Username: u.Username.Ptr(),
@@ -159,7 +165,7 @@ func (h *Handler) GetMe(ctx context.Context, _ oas.GetMeRequestObject) (oas.GetM
 		}
 	}
 
-	return me, nil
+	return me
 }
 
 // policy — политика пользователя запроса. Ошибка — роли нет или она

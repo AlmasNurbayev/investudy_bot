@@ -900,20 +900,23 @@ type LoginResponseObject interface {
 	VisitLoginResponse(ctx fiber.Ctx) error
 }
 
-type Login204ResponseHeaders struct {
+type Login200ResponseHeaders struct {
 	SetCookie *string
 }
 
-type Login204Response struct {
-	Headers Login204ResponseHeaders
+type Login200JSONResponse struct {
+	Body    Me
+	Headers Login200ResponseHeaders
 }
 
-func (response Login204Response) VisitLoginResponse(ctx fiber.Ctx) error {
+func (response Login200JSONResponse) VisitLoginResponse(ctx fiber.Ctx) error {
 	if response.Headers.SetCookie != nil {
 		ctx.Response().Header.Set("Set-Cookie", fmt.Sprint(*response.Headers.SetCookie))
 	}
-	ctx.Status(204)
-	return nil
+	ctx.Response().Header.Set("Content-Type", "application/json")
+	ctx.Status(200)
+
+	return ctx.JSON(&response.Body)
 }
 
 type Login400JSONResponse struct{ BadRequestJSONResponse }

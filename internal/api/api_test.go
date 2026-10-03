@@ -177,10 +177,21 @@ func (e *env) do(method, path, cookie string, body any) *http.Response {
 func (e *env) login(login string) string {
 	e.t.Helper()
 
+	cookie, _ := e.loginAs(login)
+
+	return cookie
+}
+
+// loginAs входит и возвращает cookie сессии вместе с телом ответа.
+func (e *env) loginAs(login string) (string, oas.Me) {
+	e.t.Helper()
+
 	resp := e.do(http.MethodPost, "/api/auth/login", "", oas.LoginRequest{Login: login, Password: password})
-	if resp.StatusCode != http.StatusNoContent {
+	if resp.StatusCode != http.StatusOK {
 		e.t.Fatalf("login %s: %d %s", login, resp.StatusCode, read(resp))
 	}
+
+	me := decode[oas.Me](e.t, resp)
 
 	for _, c := range resp.Cookies() {
 		if c.Name == handler.CookieName {
@@ -188,13 +199,13 @@ func (e *env) login(login string) string {
 				e.t.Errorf("cookie без HttpOnly/SameSite=Lax: %+v", c)
 			}
 
-			return c.Value
+			return c.Value, me
 		}
 	}
 
 	e.t.Fatalf("login %s: cookie не выдана", login)
 
-	return ""
+	return "", me
 }
 
 func read(resp *http.Response) string {
@@ -285,16 +296,59 @@ func TestPnlPolicyPerRole(t *testing.T) {
 	}
 }
 
+// Ответ входа несёт пользователя: id, роль, имя, подразделение руководителя —
+// фронту не нужен второй запрос. Тело то же, что у /api/me.
+func TestLoginResponse(t *testing.T) {
+	e := setup(t)
+
+	if _, err := e.users.Create(context.Background(), model.UserInput{
+		Login: null.StringFrom("head"), Username: null.StringFrom("Иван Петров"),
+		Role: string(access.DivisionHead), DivisionID: null.IntFrom(e.sales),
+	}, password); err != nil {
+		t.Fatal(err)
+	}
+	e.user("cfo", access.CFO, 0, true)
+
+	cookie, me := e.loginAs("head")
+
+	if me.Id == 0 || me.Role != oas.DivisionHead || me.Username == nil || *me.Username != "Иван Петров" {
+		t.Errorf("вход руководителя: %+v", me)
+	}
+	if me.Division == nil || me.Division.Name != "отдел продаж" || int64(me.Division.Id) != e.sales {
+		t.Errorf("подразделение в ответе входа: %+v", me.Division)
+	}
+	if me.IsAdmin || !me.HasReport || me.LastLine == nil || *me.LastLine != "1" {
+		t.Errorf("права в ответе входа: %+v", me)
+	}
+
+	// Тот же ответ, что отдаёт /api/me, — а подразделения нет, если не задано.
+	if again := decode[oas.Me](t, e.do(http.MethodGet, "/api/me", cookie, nil)); again.Id != me.Id || again.Role != me.Role {
+		t.Errorf("/api/me расходится с ответом входа: %+v и %+v", again, me)
+	}
+
+	_, cfo := e.loginAs("cfo")
+	if cfo.Division != nil || !cfo.IsAdmin || cfo.LastLine != nil {
+		t.Errorf("вход финдира: %+v", cfo)
+	}
+}
+
 func TestAuthRequired(t *testing.T) {
 	e := setup(t)
 	e.user("cfo", access.CFO, 0, true)
 
-	for _, path := range []string{"/api/me", "/api/pnl", "/api/snapshots", "/api/admin/users", "/api/docs", "/api/openapi.yaml"} {
+	for _, path := range []string{"/api/me", "/api/pnl", "/api/snapshots", "/api/admin/users"} {
 		if resp := e.do(http.MethodGet, path, "", nil); resp.StatusCode != http.StatusUnauthorized {
 			t.Errorf("%s без сессии: %d", path, resp.StatusCode)
 		}
 		if resp := e.do(http.MethodGet, path, "forged-token", nil); resp.StatusCode != http.StatusUnauthorized {
 			t.Errorf("%s с поддельной cookie: %d", path, resp.StatusCode)
+		}
+	}
+
+	// Документация открыта без сессии: иначе её не из чего открыть до входа.
+	for _, path := range []string{"/api/docs", "/api/openapi.yaml", "/healthz"} {
+		if resp := e.do(http.MethodGet, path, "", nil); resp.StatusCode != http.StatusOK {
+			t.Errorf("%s без сессии: %d, ждали 200", path, resp.StatusCode)
 		}
 	}
 
@@ -404,7 +458,7 @@ func TestAdminUsers(t *testing.T) {
 	}
 
 	resp = e.do(http.MethodPost, "/api/auth/login", "", oas.LoginRequest{Login: "petrov", Password: newPw})
-	if resp.StatusCode != http.StatusNoContent {
+	if resp.StatusCode != http.StatusOK {
 		t.Errorf("новый пароль не принят: %d", resp.StatusCode)
 	}
 

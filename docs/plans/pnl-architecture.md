@@ -405,7 +405,7 @@ CREATE TABLE pnl_weekly_rule_terms (
 ## 4. Контракт API (вместо списка из backend.md)
 
 ```
-POST   /api/auth/login              {login, password} → Set-Cookie
+POST   /api/auth/login              {login, password} → Set-Cookie + тело как у /api/me
 POST   /api/auth/logout
 GET    /api/me                      роль, is_admin, видимые строки, подразделение
 

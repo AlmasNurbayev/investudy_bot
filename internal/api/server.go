@@ -24,9 +24,15 @@ import (
 
 // public — маршруты без сессии. Список, а не пометка на маршруте: по
 // умолчанию закрыто всё, и новая ручка без сессии не откроется по забывчивости.
+//
+// Документация открыта намеренно: контракт описывает форму запросов и секретов
+// не содержит, а страницы входа на сайте до SPA нет — за сессией Swagger UI
+// не из чего было бы открыть. «Try it out» после входа работает с cookie.
 var public = map[string]bool{
-	"/api/auth/login": true,
-	"/healthz":        true,
+	"/api/auth/login":   true,
+	"/healthz":          true,
+	"/api/docs":         true,
+	"/api/openapi.yaml": true,
 }
 
 const adminPrefix = "/api/admin/"
@@ -41,8 +47,7 @@ func New(h *handler.Handler, a *auth.Service, requestTimeout time.Duration) *fib
 
 	app.Get("/healthz", func(c fiber.Ctx) error { return c.SendString("ok") })
 
-	// Контракт и Swagger UI из того же файла, по которому сгенерирован
-	// сервер — за сессией, как и всё остальное.
+	// Контракт и Swagger UI из того же файла, по которому сгенерирован сервер.
 	app.Get("/api/openapi.yaml", func(c fiber.Ctx) error {
 		c.Set(fiber.HeaderContentType, "application/yaml; charset=utf-8")
 		return c.Send(apispec.OpenAPI)

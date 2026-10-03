@@ -116,9 +116,12 @@ func TestLoginAndAuthenticate(t *testing.T) {
 	ctx := context.Background()
 
 	// Логин без учёта регистра и пробелов.
-	token, err := svc.Login(ctx, " Almas ", "secret password", "1.1.1.1", "test", t0)
+	token, user, err := svc.Login(ctx, " Almas ", "secret password", "1.1.1.1", "test", t0)
 	if err != nil {
 		t.Fatalf("login: %v", err)
+	}
+	if user.ID != 1 || user.Role != "cfo" {
+		t.Errorf("вход вернул пользователя %+v", user)
 	}
 
 	for h := range store.sessions {
@@ -160,12 +163,12 @@ func TestLoginRejects(t *testing.T) {
 	svc, _ := New(store)
 	ctx := context.Background()
 
-	if _, err := svc.Login(ctx, "almas", "wrong", "ip", "", t0); !errors.Is(err, ErrBadCredentials) {
+	if _, _, err := svc.Login(ctx, "almas", "wrong", "ip", "", t0); !errors.Is(err, ErrBadCredentials) {
 		t.Errorf("неверный пароль: %v", err)
 	}
 
 	// Несуществующий логин — та же ошибка, без подсказки, что логина нет.
-	if _, err := svc.Login(ctx, "nobody", "secret password", "ip", "", t0); !errors.Is(err, ErrBadCredentials) {
+	if _, _, err := svc.Login(ctx, "nobody", "secret password", "ip", "", t0); !errors.Is(err, ErrBadCredentials) {
 		t.Errorf("неизвестный логин: %v", err)
 	}
 
@@ -173,7 +176,7 @@ func TestLoginRejects(t *testing.T) {
 	blocked.BlockedAt = null.TimeFrom(t0)
 	store.users["almas"] = blocked
 
-	if _, err := svc.Login(ctx, "almas", "secret password", "ip2", "", t0); !errors.Is(err, ErrBadCredentials) {
+	if _, _, err := svc.Login(ctx, "almas", "secret password", "ip2", "", t0); !errors.Is(err, ErrBadCredentials) {
 		t.Errorf("заблокированный вошёл: %v", err)
 	}
 }
@@ -185,22 +188,22 @@ func TestLoginRateLimit(t *testing.T) {
 	ctx := context.Background()
 
 	for range maxFailures {
-		_, _ = svc.Login(ctx, "almas", "wrong", "6.6.6.6", "", t0)
+		_, _, _ = svc.Login(ctx, "almas", "wrong", "6.6.6.6", "", t0)
 	}
 
 	var tooMany TooManyAttempts
-	if _, err := svc.Login(ctx, "almas", "secret password", "6.6.6.6", "", t0.Add(time.Minute)); !errors.As(err, &tooMany) {
+	if _, _, err := svc.Login(ctx, "almas", "secret password", "6.6.6.6", "", t0.Add(time.Minute)); !errors.As(err, &tooMany) {
 		t.Fatalf("вход не заперт: %v", err)
 	}
 	if tooMany.RetryAfter != failureWindow-time.Minute {
 		t.Errorf("RetryAfter = %s", tooMany.RetryAfter)
 	}
 
-	if _, err := svc.Login(ctx, "almas", "secret password", "7.7.7.7", "", t0.Add(time.Minute)); err != nil {
+	if _, _, err := svc.Login(ctx, "almas", "secret password", "7.7.7.7", "", t0.Add(time.Minute)); err != nil {
 		t.Errorf("чужой адрес запер владельца: %v", err)
 	}
 
-	if _, err := svc.Login(ctx, "almas", "secret password", "6.6.6.6", "", t0.Add(failureWindow)); err != nil {
+	if _, _, err := svc.Login(ctx, "almas", "secret password", "6.6.6.6", "", t0.Add(failureWindow)); err != nil {
 		t.Errorf("окно кончилось, а вход заперт: %v", err)
 	}
 }

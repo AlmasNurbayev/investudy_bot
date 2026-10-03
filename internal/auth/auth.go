@@ -78,18 +78,21 @@ func NormalizeLogin(login string) string {
 	return strings.ToLower(strings.TrimSpace(login))
 }
 
-// Login проверяет логин и пароль и открывает сессию. Отдаёт токен для cookie.
-func (s *Service) Login(ctx context.Context, login, password, ip, userAgent string, now time.Time) (string, error) {
+// Login проверяет логин и пароль и открывает сессию. Отдаёт токен для cookie
+// и пользователя — ответ входа несёт его данные.
+func (s *Service) Login(
+	ctx context.Context, login, password, ip, userAgent string, now time.Time,
+) (string, model.User, error) {
 	login = NormalizeLogin(login)
 	key := login + "|" + ip
 
 	if locked, retry := s.limiter.blocked(key, now); locked {
-		return "", TooManyAttempts{RetryAfter: retry}
+		return "", model.User{}, TooManyAttempts{RetryAfter: retry}
 	}
 
 	user, hash, err := s.store.UserByLogin(ctx, login)
 	if err != nil && !errors.Is(err, repository.ErrNotFound) {
-		return "", err
+		return "", model.User{}, err
 	}
 
 	if hash == "" {
@@ -99,26 +102,26 @@ func (s *Service) Login(ctx context.Context, login, password, ip, userAgent stri
 
 	ok, err := VerifyPassword(hash, password)
 	if err != nil {
-		return "", fmt.Errorf("verify password of user %d: %w", user.ID, err)
+		return "", model.User{}, fmt.Errorf("verify password of user %d: %w", user.ID, err)
 	}
 
 	if !ok || user.ID == 0 || user.BlockedAt.Valid || hash == s.dummy {
 		s.limiter.fail(key, now)
-		return "", ErrBadCredentials
+		return "", model.User{}, ErrBadCredentials
 	}
 
 	s.limiter.reset(key)
 
 	token, tokenHash, err := newToken()
 	if err != nil {
-		return "", err
+		return "", model.User{}, err
 	}
 
 	if err = s.store.CreateSession(ctx, tokenHash, user.ID, now, now.Add(SessionTTL), userAgent); err != nil {
-		return "", err
+		return "", model.User{}, err
 	}
 
-	return token, nil
+	return token, user, nil
 }
 
 // Authenticate находит пользователя по токену сессии. renewed — срок
