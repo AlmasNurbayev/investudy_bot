@@ -1,5 +1,11 @@
-// Разовая утилита: выгружает формулы и значения всех листов таблицы в JSON.
-// Лежит в _tmp — каталог исключён из git и контекста Docker.
+// sheetformulas — утилита разработчика: выгружает формулы и значения всех
+// листов таблицы в JSON.
+//
+// Ею разбирали формулы листа «PL weekly» (docs/plans/pnl-architecture.md, §1)
+// и ею же понадобится переносить из листа правила недельного расчёта (этап 7).
+// В образ не попадает: Dockerfile собирает только ./cmd/...
+//
+//	go run ./tools/sheetformulas <spreadsheetID> <outDir>
 package main
 
 import (
@@ -101,7 +107,7 @@ func get(c *http.Client, u string, v any) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -121,7 +127,7 @@ func creds(path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 1<<20), 1<<20)

@@ -11,7 +11,7 @@ endif
 # спотыкается на _volume_db — файлы базы (bind-mount из docker-compose.yml)
 # принадлежат root с правами 0700, и gofmt падает с «permission denied»,
 # пока стенд поднят.
-GO_DIRS := ./cmd ./internal ./migrate
+GO_DIRS := ./cmd ./internal ./migrate ./tools
 
 COMPOSE := docker compose -f docker-compose.yml
 IMAGE   ?= investudy_bot:latest

@@ -76,22 +76,26 @@ func TestShutdownWaitsForInflight(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	stop()
 
+	// Ответ на /slow — через 400 мс после остановки; serve обязан вернуться
+	// сразу за ним, а не ждать весь grace из-за keep-alive соединений.
 	select {
 	case err := <-done:
 		if err != nil {
 			t.Fatalf("serve: %v", err)
 		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("serve не вернулся")
+	case <-time.After(2 * time.Second):
+		t.Fatal("serve ждёт дольше, чем выполняется начатый запрос: держат keep-alive соединения?")
 	}
 
+	// Ответ обязан дойти целиком, а не оборваться остановкой. Ждём его с
+	// запасом: клиентской горутине ещё нужно дочитать тело.
 	select {
 	case code := <-status:
 		if code != http.StatusOK {
 			t.Errorf("начатый запрос получил %d, ждали 200", code)
 		}
-	default:
-		t.Error("serve вернулся раньше, чем начатый запрос получил ответ")
+	case <-time.After(time.Second):
+		t.Error("начатый до остановки запрос так и не получил ответа")
 	}
 }
 

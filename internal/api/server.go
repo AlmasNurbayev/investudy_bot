@@ -55,6 +55,10 @@ type Server struct {
 // ждать значило бы упереться в SIGKILL от Docker.
 const abortWait = 2 * time.Second
 
+// flushWait — сколько после конца запросов ждать, пока fiber допишет ответы
+// и закроет соединения: обработчик вернулся раньше, чем ответ ушёл клиенту.
+const flushWait = time.Second
+
 // New собирает приложение. requestTimeout — потолок одного запроса (DB_TIMEOUT).
 func New(h *handler.Handler, a *auth.Service, requestTimeout time.Duration) *Server {
 	s := newServer(requestTimeout)
@@ -167,9 +171,21 @@ func (s *Server) serve(ctx context.Context, ln net.Listener, grace time.Duration
 	graceCtx, cancel := context.WithTimeout(context.Background(), grace)
 	defer cancel()
 
-	if err := s.app.ShutdownWithContext(graceCtx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
-		logger.ERROR("api shutdown", "err", err)
-	}
+	// Остановка fiber — в фоне: приёмник она закрывает сразу, а потом ждёт,
+	// пока закроются соединения. Ждать её до конца grace нельзя — keep-alive
+	// соединение клиента может растянуть каждую остановку на весь grace, —
+	// поэтому конец работы считается по запросам (их считает track), а её
+	// конец ждётся коротко, в flushWait: только чтобы готовые ответы успели
+	// уйти клиентам до выхода процесса.
+	shutdownDone := make(chan struct{})
+	go func() {
+		defer close(shutdownDone)
+
+		if err := s.app.ShutdownWithContext(graceCtx); err != nil && !errors.Is(err, context.DeadlineExceeded) &&
+			!errors.Is(err, context.Canceled) {
+			logger.ERROR("api shutdown", "err", err)
+		}
+	}()
 
 	done := make(chan struct{})
 	go func() {
@@ -188,6 +204,11 @@ func (s *Server) serve(ctx context.Context, ln net.Listener, grace time.Duration
 		case <-time.After(abortWait):
 			logger.ERROR("api: прерванные запросы не завершились", "wait", abortWait)
 		}
+	}
+
+	select {
+	case <-shutdownDone:
+	case <-time.After(flushWait):
 	}
 
 	logger.INF("api stopped")
