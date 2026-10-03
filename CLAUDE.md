@@ -198,12 +198,12 @@ REST API на fiber v3 — демон, как бот. **Подробно — [do
 | `MIN_PERIOD`              | Нижняя граница загрузки, `ДД.ММ.ГГГГ` (необязательная) |
 | `TELEGRAM_BOT_TOKEN`      | Токен от @BotFather                                    |
 | `TELEGRAM_ADMIN_ID`       | Telegram-id **единственного** получателя оповещений парсера |
-| `API_ADDR`                | Адрес REST API (`:8080`)                               |
+| `API_PORT`                | Порт REST API (обязательный; его же подставляет compose) |
 | `API_COOKIE_SECURE`       | `Secure` у cookie сессии (`true`; `false` — только локально по http) |
 
 Расписаний в конфиге нет: `parser` и `prunedb` одноразовые, их запускает крон. Схема чистки — флаг `prunedb -scheme`, а не переменная: это параметр запуска, а не настройка среды.
 
-`cmd/api` читает конфиг через `config.LoadAPI()`: `POSTGRES_*`, `DB_TIMEOUT`, `API_ADDR`, `API_COOKIE_SECURE`. Доступы к Sheets и Telegram ему не нужны. Домена cookie нет намеренно: сайт same-origin через nginx, и cookie без `Domain` привязана к своему хосту.
+`cmd/api` читает конфиг через `config.LoadAPI()`: `POSTGRES_*`, `DB_TIMEOUT`, `API_PORT`, `API_COOKIE_SECURE`. Доступы к Sheets и Telegram ему не нужны. Домена cookie нет намеренно: сайт same-origin через nginx, и cookie без `Domain` привязана к своему хосту.
 
 Мигратору и `prunedb` нужны только `POSTGRES_*` и `DB_TIMEOUT` — они читают конфиг через `config.LoadPostgres()`, а не через `Load()`, чтобы не требовать доступов к Sheets.
 

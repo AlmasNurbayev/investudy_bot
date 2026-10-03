@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -165,13 +166,20 @@ func LoadBot() (BotConfig, error) {
 type APIConfig struct {
 	Postgres PostgresConfig
 
-	// Addr — адрес, который слушает API; снаружи его закрывает nginx.
-	Addr string `env:"API_ADDR" envDefault:":8080"`
+	// Port — порт, который слушает API; снаружи его закрывает nginx. Обязательный:
+	// тот же номер нужен compose для проброса порта, и значение по умолчанию в
+	// двух местах разошлось бы молча.
+	Port uint16 `env:"API_PORT,required,notEmpty"`
 
 	// CookieSecure — флаг Secure у cookie сессии. Выключать только для
 	// локального запуска по http: в бою сайт за TLS, и cookie без Secure
 	// ушла бы открытым текстом при первом же http-запросе.
 	CookieSecure bool `env:"API_COOKIE_SECURE" envDefault:"true"`
+}
+
+// Addr — адрес для Listen: на всех интерфейсах контейнера, порт из API_PORT.
+func (c APIConfig) Addr() string {
+	return ":" + strconv.Itoa(int(c.Port))
 }
 
 // LoadAPI читает настройки API.
@@ -180,6 +188,12 @@ func LoadAPI() (APIConfig, error) {
 
 	if err := env.Parse(&cfg); err != nil {
 		return APIConfig{}, err
+	}
+
+	// uint16 отсекает отрицательные и слишком большие числа, но не ноль, а
+	// порт 0 ОС выдала бы случайный — и API стал бы недоступен по известному адресу.
+	if cfg.Port == 0 {
+		return APIConfig{}, fmt.Errorf("API_PORT: порт 0 недопустим")
 	}
 
 	return cfg, nil

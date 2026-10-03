@@ -73,12 +73,15 @@ services:
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
-      API_ADDR: ":8080"
       TZ: Asia/Almaty
     command: ["sh", "-c", "/app/migrator -typeTask up && exec /app/api"]
 
+    # Номер порта — из API_PORT (его же читает сам API из env_file). Для
+    # подстановки в этот файл compose берёт .env рядом с ним, поэтому
+    # переменная должна лежать и там; без неё compose не стартует, а не
+    # пробросит порт «по умолчанию», который разошёлся бы с API.
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:${API_PORT:?задайте API_PORT в .env}:${API_PORT}"
 
     depends_on:
       postgres:

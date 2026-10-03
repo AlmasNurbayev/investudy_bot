@@ -73,5 +73,5 @@ func run(ctx context.Context, cfg config.APIConfig) error {
 
 	// Пул закрывается отложенным вызовом выше — уже после того, как Run
 	// дождался остановки fiber: иначе Close ждал бы занятые соединения.
-	return api.Run(ctx, app, cfg.Addr, shutdownGrace)
+	return api.Run(ctx, app, cfg.Addr(), shutdownGrace)
 }
