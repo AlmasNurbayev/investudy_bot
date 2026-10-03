@@ -187,8 +187,11 @@ type PnlReport struct {
 	Columns []Column `json:"columns"`
 
 	// Incomplete Есть неразмеченные статьи — отчёт неполон.
-	Incomplete bool        `json:"incomplete"`
-	Lines      []PnlLine   `json:"lines"`
+	Incomplete bool      `json:"incomplete"`
+	Lines      []PnlLine `json:"lines"`
+
+	// MaxColumns Потолок колонок отчёта — столько можно выбрать в запросе.
+	MaxColumns int         `json:"max_columns"`
 	Snapshot   SnapshotRef `json:"snapshot"`
 
 	// Unmapped Только администратору.
@@ -301,9 +304,11 @@ type Unauthorized = Error
 type GetPnlParams struct {
 	Grain *Grain `form:"grain,omitempty" json:"grain,omitempty"`
 
-	// Cols Колонки через запятую, не больше 12, все — выбранной гранулярности:
+	// Cols Колонки через запятую, все — выбранной гранулярности:
 	// `2026-03` (месяц), `2026-Q1` (квартал), `2026` (год).
-	// По умолчанию — последние 6 месяцев, включая текущий.
+	// Не больше `max_columns` из ответа (настройка `pnl` в settings, по
+	// умолчанию 12). Без колонок — последние `default_months` месяцев
+	// (по умолчанию 6), включая текущий.
 	Cols *[]string `form:"cols,omitempty" json:"cols,omitempty"`
 
 	// Snapshot Версия среза; по умолчанию — рабочая (новейшая непустая).

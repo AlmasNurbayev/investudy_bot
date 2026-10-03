@@ -27,6 +27,9 @@ type readerStub struct {
 
 	facts []pnl.Fact
 
+	pnlCfg     model.PnlSettings
+	pnlMissing bool
+
 	gotSnapshot int64
 	gotCols     []period.Range
 	gotDivision int32
@@ -47,6 +50,14 @@ func (r *readerStub) SnapshotByID(_ context.Context, id int64) (model.Snapshot, 
 	}
 
 	return model.Snapshot{}, repository.ErrNotFound
+}
+
+func (r *readerStub) PnlSettings(context.Context) (model.PnlSettings, error) {
+	if r.pnlMissing {
+		return model.PnlSettings{}, repository.ErrSettingNotFound
+	}
+
+	return r.pnlCfg, nil
 }
 
 func (r *readerStub) PnlStructure(context.Context) (pnl.Structure, error) {
@@ -199,7 +210,7 @@ func TestPnLAppliesPolicy(t *testing.T) {
 		facts:     []pnl.Fact{{Col: 0, Item: "доходы", Sum: num(t, "10.00")}},
 	}
 
-	cols, err := period.ParseColumns(period.Month, []string{"2026-08"})
+	cols, err := period.ParseColumns(period.Month, []string{"2026-08"}, period.DefaultMaxColumns)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +237,7 @@ func TestPnLAppliesPolicy(t *testing.T) {
 func TestPnLExplicitSnapshot(t *testing.T) {
 	reader := &readerStub{snapshots: []model.Snapshot{snap(143, 70000), snap(142, 0), snap(141, 69000)}}
 	svc := New(reader)
-	cols := period.DefaultColumns(now())
+	cols := period.DefaultColumns(now(), period.DefaultMonths)
 
 	got, err := svc.PnL(context.Background(), access.Policy{}, 141, cols)
 	if err != nil {
@@ -239,6 +250,31 @@ func TestPnLExplicitSnapshot(t *testing.T) {
 	for _, id := range []int64{142, 999} {
 		if _, err = svc.PnL(context.Background(), access.Policy{}, id, cols); !errors.Is(err, ErrSnapshotNotFound) {
 			t.Errorf("срез %d: %v, ждали ErrSnapshotNotFound", id, err)
+		}
+	}
+}
+
+// Ограничения колонок: заданные берутся как есть; нет строки или пустые поля —
+// значения из кода; месяцев по умолчанию не больше потолка.
+func TestPnlLimits(t *testing.T) {
+	cases := map[string]struct {
+		cfg     model.PnlSettings
+		missing bool
+		want    period.Limits
+	}{
+		"нет строки":     {missing: true, want: period.Limits{MaxColumns: 12, DefaultMonths: 6}},
+		"пустые поля":    {cfg: model.PnlSettings{}, want: period.Limits{MaxColumns: 12, DefaultMonths: 6}},
+		"минус":          {cfg: model.PnlSettings{DefaultMonths: -3, MaxColumns: -1}, want: period.Limits{MaxColumns: 12, DefaultMonths: 6}},
+		"заданные":       {cfg: model.PnlSettings{DefaultMonths: 3, MaxColumns: 24}, want: period.Limits{MaxColumns: 24, DefaultMonths: 3}},
+		"месяцев > пот.": {cfg: model.PnlSettings{DefaultMonths: 9, MaxColumns: 4}, want: period.Limits{MaxColumns: 4, DefaultMonths: 4}},
+	}
+
+	for name, c := range cases {
+		reader := &readerStub{pnlCfg: c.cfg, pnlMissing: c.missing}
+
+		got, err := New(reader).PnlLimits(context.Background())
+		if err != nil || got != c.want {
+			t.Errorf("%s: %+v, %v; ждали %+v", name, got, err, c.want)
 		}
 	}
 }

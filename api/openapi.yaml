@@ -109,14 +109,15 @@ paths:
         - name: cols
           in: query
           description: |
-            Колонки через запятую, не больше 12, все — выбранной гранулярности:
+            Колонки через запятую, все — выбранной гранулярности:
             `2026-03` (месяц), `2026-Q1` (квартал), `2026` (год).
-            По умолчанию — последние 6 месяцев, включая текущий.
+            Не больше `max_columns` из ответа (настройка `pnl` в settings, по
+            умолчанию 12). Без колонок — последние `default_months` месяцев
+            (по умолчанию 6), включая текущий.
           style: form
           explode: false
           schema:
             type: array
-            maxItems: 12
             items:
               type: string
         - name: snapshot
@@ -503,8 +504,11 @@ components:
 
     PnlReport:
       type: object
-      required: [snapshot, columns, lines, incomplete]
+      required: [snapshot, columns, lines, incomplete, max_columns]
       properties:
+        max_columns:
+          description: Потолок колонок отчёта — столько можно выбрать в запросе.
+          type: integer
         snapshot:
           $ref: '#/components/schemas/SnapshotRef'
         columns:

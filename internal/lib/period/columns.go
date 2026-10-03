@@ -16,12 +16,21 @@ const (
 	Year    Grain = "year"
 )
 
-// MaxColumns — потолок колонок ОПиУ (решение 15 плана): шире таблица
-// перестаёт читаться, а запрос — быть дешёвым.
-const MaxColumns = 12
+// Значения по умолчанию из кода: действуют, когда в settings (ключ pnl) нет
+// строки или поле пустое. Потолок — решение 15 плана: шире таблица перестаёт
+// читаться, а запрос — быть дешёвым.
+const (
+	DefaultMaxColumns = 12
+	DefaultMonths     = 6
+)
 
-// DefaultMonths — сколько месяцев показывать, когда колонки не выбраны.
-const DefaultMonths = 6
+// Limits — ограничения колонок отчёта.
+type Limits struct {
+	// MaxColumns — потолок колонок.
+	MaxColumns int
+	// DefaultMonths — сколько месяцев показывать, когда колонки не выбраны.
+	DefaultMonths int
+}
 
 var shortMonths = [...]string{
 	"Янв", "Фев", "Мар", "Апр", "Май", "Июн",
@@ -34,7 +43,7 @@ type Column struct {
 	Range
 }
 
-// ParseColumns разбирает ключи колонок одной гранулярности:
+// ParseColumns разбирает ключи колонок одной гранулярности, не больше maxColumns:
 // месяц `2026-03`, квартал `2026-Q1`, год `2026`.
 //
 // Все колонки одной длины: сравнивать месяц с кварталом в одной таблице
@@ -42,12 +51,12 @@ type Column struct {
 //
 // Даты — полночь UTC: колонка period в базе — DATE, и зона тут только
 // сдвинула бы день при передаче параметра.
-func ParseColumns(g Grain, keys []string) ([]Column, error) {
+func ParseColumns(g Grain, keys []string, maxColumns int) ([]Column, error) {
 	if len(keys) == 0 {
 		return nil, fmt.Errorf("не выбрано ни одной колонки")
 	}
-	if len(keys) > MaxColumns {
-		return nil, fmt.Errorf("колонок %d, а можно не больше %d", len(keys), MaxColumns)
+	if len(keys) > maxColumns {
+		return nil, fmt.Errorf("колонок %d, а можно не больше %d", len(keys), maxColumns)
 	}
 
 	seen := map[string]bool{}
@@ -71,11 +80,11 @@ func ParseColumns(g Grain, keys []string) ([]Column, error) {
 	return out, nil
 }
 
-// DefaultColumns — последние DefaultMonths месяцев, включая месяц now.
-func DefaultColumns(now time.Time) []Column {
-	out := make([]Column, 0, DefaultMonths)
+// DefaultColumns — последние months месяцев, включая месяц now.
+func DefaultColumns(now time.Time, months int) []Column {
+	out := make([]Column, 0, months)
 
-	for i := DefaultMonths - 1; i >= 0; i-- {
+	for i := months - 1; i >= 0; i-- {
 		// Отсчёт от первого числа: AddDate по произвольному дню
 		// нормализует 31 марта минус месяц в 3 марта.
 		from := time.Date(now.Year(), now.Month()-time.Month(i), 1, 0, 0, 0, 0, time.UTC)

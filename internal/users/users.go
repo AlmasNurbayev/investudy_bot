@@ -32,6 +32,7 @@ func (e ValidationError) Error() string {
 
 // Store — хранилище пользователей (реализует repository.Users).
 type Store interface {
+	AuthSettings(ctx context.Context) (model.AuthSettings, error)
 	ListUsers(ctx context.Context) ([]model.User, error)
 	UserByID(ctx context.Context, id int64) (model.User, error)
 	CreateUser(ctx context.Context, in model.UserInput, hash string) (int64, error)
@@ -58,7 +59,12 @@ func (s *Service) Create(ctx context.Context, in model.UserInput, password strin
 
 	problems := Validate(in)
 	if in.Login.Valid {
-		problems = append(problems, checkPassword(password)...)
+		policy, err := auth.LoadPolicy(ctx, s.store)
+		if err != nil {
+			return model.User{}, err
+		}
+
+		problems = append(problems, checkPassword(password, policy.MinPasswordLen)...)
 	} else if password != "" {
 		problems = append(problems, "пароль без логина не нужен: войти на сайт без логина нельзя")
 	}
@@ -108,7 +114,12 @@ func (s *Service) Update(ctx context.Context, actor model.User, id int64, in mod
 // SetPassword задаёт пароль. Старый не спрашивается: менять пароли может
 // только администратор, и хеш руками не посчитать.
 func (s *Service) SetPassword(ctx context.Context, id int64, password string) error {
-	if problems := checkPassword(password); len(problems) > 0 {
+	policy, err := auth.LoadPolicy(ctx, s.store)
+	if err != nil {
+		return err
+	}
+
+	if problems := checkPassword(password, policy.MinPasswordLen); len(problems) > 0 {
 		return ValidationError{Problems: problems}
 	}
 
@@ -180,9 +191,9 @@ func Guard(actorID int64, before model.User, in model.UserInput, activeAdmins []
 	return problems
 }
 
-func checkPassword(password string) []string {
-	if len([]rune(password)) < auth.MinPasswordLen {
-		return []string{fmt.Sprintf("пароль короче %d символов", auth.MinPasswordLen)}
+func checkPassword(password string, minLen int) []string {
+	if len([]rune(password)) < minLen {
+		return []string{fmt.Sprintf("пароль короче %d символов", minLen)}
 	}
 
 	return nil

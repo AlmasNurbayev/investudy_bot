@@ -2,11 +2,13 @@ package repository_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/guregu/null/v6"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"investudy_bot/internal/lib/money"
 	"investudy_bot/internal/model"
@@ -28,6 +30,23 @@ func newReader(t *testing.T) (*repository.Reader, *repository.Store, *pgx.Conn) 
 
 	return repository.NewReader(querier{conn}), store, conn
 }
+
+// conn2pool подгоняет одиночное соединение под repository.TxQuerier.
+type conn2pool struct{ conn *pgx.Conn }
+
+func (c conn2pool) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	return c.conn.Query(ctx, sql, args...)
+}
+
+func (c conn2pool) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	return c.conn.QueryRow(ctx, sql, args...)
+}
+
+func (c conn2pool) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	return c.conn.Exec(ctx, sql, args...)
+}
+
+func (c conn2pool) Begin(ctx context.Context) (pgx.Tx, error) { return c.conn.Begin(ctx) }
 
 type querier struct{ conn *pgx.Conn }
 
@@ -266,6 +285,49 @@ func TestClosedReportsSettingsComeFromMigration(t *testing.T) {
 		if !want[item] {
 			t.Errorf("неожиданное исключение %q", item)
 		}
+	}
+}
+
+// Срок сессии приезжает миграцией 000004; пустая настройка — громкая ошибка.
+func TestAuthSettingsComeFromMigration(t *testing.T) {
+	reader, _, conn := newReader(t)
+	ctx := context.Background()
+
+	users := repository.NewUsers(conn2pool{conn})
+
+	cfg, err := users.AuthSettings(ctx)
+	if err != nil {
+		t.Fatalf("AuthSettings: %v", err)
+	}
+	want := model.AuthSettings{SessionTTLDays: 90, LoginMaxFailures: 5, LoginWindowMinutes: 15, MinPasswordLength: 10}
+	if cfg != want {
+		t.Errorf("auth = %+v, ждали %+v из миграции", cfg, want)
+	}
+
+	pnlCfg, err := reader.PnlSettings(ctx)
+	if err != nil || pnlCfg != (model.PnlSettings{DefaultMonths: 6, MaxColumns: 12}) {
+		t.Errorf("pnl = %+v, %v; ждали 6 и 12 из миграции", pnlCfg, err)
+	}
+
+	// Тестовая база общая: строку возвращаем в любом исходе.
+	t.Cleanup(func() {
+		_, _ = conn.Exec(ctx, `INSERT INTO settings (key, value, description) VALUES
+			('auth', '{"session_ttl_days": 90, "login_max_failures": 5, "login_window_minutes": 15, "min_password_length": 10}',
+			 'Сайт: срок сессии (дни), лимит неудачных входов и окно (минуты), минимальная длина пароля'),
+			('pnl', '{"default_months": 6, "max_columns": 12}', 'ОПиУ на сайте: месяцев по умолчанию и потолок колонок')
+			ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, description = EXCLUDED.description`)
+	})
+
+	if _, err = conn.Exec(ctx, `DELETE FROM settings WHERE key IN ('auth', 'pnl')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = reader.PnlSettings(ctx); !errors.Is(err, repository.ErrSettingNotFound) {
+		t.Errorf("нет строки pnl: %v, ждали ErrSettingNotFound", err)
+	}
+	// Отсутствие — отдельная ошибка: auth по ней берёт срок по умолчанию,
+	// а не путает её со сбоем базы.
+	if _, err = users.AuthSettings(ctx); !errors.Is(err, repository.ErrSettingNotFound) {
+		t.Errorf("нет строки настройки: %v, ждали ErrSettingNotFound", err)
 	}
 }
 

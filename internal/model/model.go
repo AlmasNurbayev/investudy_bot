@@ -86,6 +86,28 @@ type ClosedReportsSettings struct {
 	ExcludedItems []string `json:"excluded_items"`
 }
 
+// AuthSettings — настройки входа на сайт из таблицы settings (ключ auth).
+// Нулевое или отсутствующее поле значит «не задано»: допустимость значений и
+// значения по умолчанию определяет auth, в базе проверок нет.
+type AuthSettings struct {
+	// SessionTTLDays — скользящий срок сессии, дней.
+	SessionTTLDays int `json:"session_ttl_days"`
+	// LoginMaxFailures — неудачных входов подряд, после которых вход запирается.
+	LoginMaxFailures int `json:"login_max_failures"`
+	// LoginWindowMinutes — окно подсчёта неудач и срок запрета, минут.
+	LoginWindowMinutes int `json:"login_window_minutes"`
+	// MinPasswordLength — минимальная длина пароля.
+	MinPasswordLength int `json:"min_password_length"`
+}
+
+// PnlSettings — настройки колонок ОПиУ из таблицы settings (ключ pnl).
+type PnlSettings struct {
+	// DefaultMonths — сколько месяцев показывать, когда колонки не выбраны.
+	DefaultMonths int `json:"default_months"`
+	// MaxColumns — потолок колонок одного отчёта.
+	MaxColumns int `json:"max_columns"`
+}
+
 // ClosedReport — готовый отчёт по закрытому периоду.
 type ClosedReport struct {
 	Title string

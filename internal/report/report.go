@@ -17,6 +17,7 @@ import (
 	"investudy_bot/internal/lib/money"
 	"investudy_bot/internal/lib/period"
 	"investudy_bot/internal/lib/snapshot"
+	"investudy_bot/internal/logger"
 	"investudy_bot/internal/model"
 	"investudy_bot/internal/pnl"
 	"investudy_bot/internal/repository"
@@ -36,6 +37,7 @@ type Reader interface {
 	SnapshotByID(ctx context.Context, id int64) (model.Snapshot, error)
 	ClosedReportsSettings(ctx context.Context) (model.ClosedReportsSettings, error)
 	ClosedReport(ctx context.Context, snapshotID int64, from, to time.Time, excluded []string) ([]model.ReportRow, error)
+	PnlSettings(ctx context.Context) (model.PnlSettings, error)
 	PnlStructure(ctx context.Context) (pnl.Structure, error)
 	PnlFacts(ctx context.Context, snapshotID int64, cols []period.Range, divisionID int32) ([]pnl.Fact, error)
 }
@@ -111,6 +113,45 @@ func column(rows []model.ReportRow, pick func(model.ReportRow) pgtype.Numeric) [
 	}
 
 	return out
+}
+
+// PnlLimits — ограничения колонок ОПиУ из settings (ключ pnl).
+//
+// Нет строки или поле пустое/меньше 1 — значения из кода (period.Default*) с
+// предупреждением в лог: настройка не должна ронять отчёт. Сломанный JSON —
+// ошибка. Число месяцев по умолчанию не больше потолка: иначе отчёт без
+// выбранных колонок нарушал бы собственное ограничение.
+func (s *Service) PnlLimits(ctx context.Context) (period.Limits, error) {
+	cfg, err := s.reader.PnlSettings(ctx)
+
+	switch {
+	case errors.Is(err, repository.ErrSettingNotFound):
+		logger.WRN("нет настройки, беру значения по умолчанию из кода", "key", repository.PnlKey)
+
+		cfg = model.PnlSettings{}
+	case err != nil:
+		return period.Limits{}, err
+	}
+
+	lim := period.Limits{
+		MaxColumns:    atLeastOne(cfg.MaxColumns, period.DefaultMaxColumns, "max_columns"),
+		DefaultMonths: atLeastOne(cfg.DefaultMonths, period.DefaultMonths, "default_months"),
+	}
+
+	lim.DefaultMonths = min(lim.DefaultMonths, lim.MaxColumns)
+
+	return lim, nil
+}
+
+func atLeastOne(value, def int, name string) int {
+	if value >= 1 {
+		return value
+	}
+
+	logger.WRN("поле настройки пусто или меньше 1, беру по умолчанию из кода",
+		"key", repository.PnlKey, "field", name, "value", value, "default", def)
+
+	return def
 }
 
 // Snapshots — свежие версии для селектора и рабочая из них.

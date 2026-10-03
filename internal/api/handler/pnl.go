@@ -49,14 +49,19 @@ func (h *Handler) GetPnl(ctx context.Context, req oas.GetPnlRequestObject) (oas.
 		grain = period.Grain(*req.Params.Grain)
 	}
 
+	limits, err := h.reports.PnlLimits(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	var cols []period.Column
 	if req.Params.Cols == nil || len(*req.Params.Cols) == 0 {
 		if grain != period.Month {
 			return badRequest("для кварталов и лет выберите колонки явно"), nil
 		}
 
-		cols = period.DefaultColumns(h.now())
-	} else if cols, err = period.ParseColumns(grain, *req.Params.Cols); err != nil {
+		cols = period.DefaultColumns(h.now(), limits.DefaultMonths)
+	} else if cols, err = period.ParseColumns(grain, *req.Params.Cols, limits.MaxColumns); err != nil {
 		return badRequest(err.Error()), nil
 	}
 
@@ -76,7 +81,7 @@ func (h *Handler) GetPnl(ctx context.Context, req oas.GetPnlRequestObject) (oas.
 		return nil, err
 	}
 
-	return pnlReport(res, pol.ShowUnmapped), nil
+	return pnlReport(res, pol.ShowUnmapped, limits.MaxColumns), nil
 }
 
 func badRequest(msg string) oas.GetPnl400JSONResponse {
@@ -85,8 +90,9 @@ func badRequest(msg string) oas.GetPnl400JSONResponse {
 
 // pnlReport переводит отчёт в DTO. Суммы неразмеченных статей уходят только
 // при showUnmapped; флаг неполноты — всем.
-func pnlReport(res report.PnL, showUnmapped bool) oas.GetPnl200JSONResponse {
+func pnlReport(res report.PnL, showUnmapped bool, maxColumns int) oas.GetPnl200JSONResponse {
 	out := oas.GetPnl200JSONResponse{
+		MaxColumns: maxColumns,
 		Snapshot: oas.SnapshotRef{
 			Id:      res.Snapshot.ID,
 			TakenAt: res.Snapshot.TakenAt.Time,

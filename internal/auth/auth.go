@@ -2,7 +2,7 @@
 //
 // Сессия — случайный токен в cookie; в базе лежит только его SHA-256, поэтому
 // дамп базы не даёт готовых cookie. Срок скользящий: каждый запрос продлевает
-// его до SessionTTL. Отзыв мгновенный — пользователь читается из базы на
+// его на session_ttl_days из settings. Отзыв мгновенный — пользователь читается из базы на
 // каждом запросе, а блокировка и смена пароля удаляют его сессии.
 package auth
 
@@ -20,12 +20,9 @@ import (
 	"investudy_bot/internal/repository"
 )
 
-// SessionTTL — скользящий срок сессии.
-const SessionTTL = 90 * 24 * time.Hour
-
 // touchEvery — как часто продлевать сессию. Не на каждом запросе: отчёт
 // тянет несколько запросов подряд, и запись в базу на каждый из них
-// ничего не добавляет к сроку в 90 дней.
+// ничего не добавляет к сроку сессии.
 const touchEvery = 5 * time.Minute
 
 var (
@@ -47,6 +44,7 @@ func (e TooManyAttempts) Error() string {
 
 // Store — хранилище пользователей и сессий (реализует repository.Users).
 type Store interface {
+	AuthSettings(ctx context.Context) (model.AuthSettings, error)
 	UserByLogin(ctx context.Context, login string) (model.User, string, error)
 	CreateSession(ctx context.Context, tokenHash []byte, userID int64, now, expires time.Time, userAgent string) error
 	SessionByToken(ctx context.Context, tokenHash []byte) (repository.Session, error)
@@ -78,21 +76,37 @@ func NormalizeLogin(login string) string {
 	return strings.ToLower(strings.TrimSpace(login))
 }
 
-// Login проверяет логин и пароль и открывает сессию. Отдаёт токен для cookie
-// и пользователя — ответ входа несёт его данные.
+// Grant — выданная сессия.
+type Grant struct {
+	// Token — значение cookie.
+	Token string
+	// TTL — срок, на который выдана сессия: он же Max-Age cookie.
+	TTL  time.Duration
+	User model.User
+}
+
+// Login проверяет логин и пароль и открывает сессию. Кроме токена отдаёт
+// пользователя — ответ входа несёт его данные.
 func (s *Service) Login(
 	ctx context.Context, login, password, ip, userAgent string, now time.Time,
-) (string, model.User, error) {
+) (Grant, error) {
 	login = NormalizeLogin(login)
 	key := login + "|" + ip
 
-	if locked, retry := s.limiter.blocked(key, now); locked {
-		return "", model.User{}, TooManyAttempts{RetryAfter: retry}
+	// Настройки читаются сразу: лимит нужен до проверки пароля, срок — после.
+	// Один запрос на попытку входа — по сравнению с argon2 это ничто.
+	policy, err := LoadPolicy(ctx, s.store)
+	if err != nil {
+		return Grant{}, err
+	}
+
+	if locked, retry := s.limiter.blocked(key, now, policy.MaxFailures, policy.FailureWindow); locked {
+		return Grant{}, TooManyAttempts{RetryAfter: retry}
 	}
 
 	user, hash, err := s.store.UserByLogin(ctx, login)
 	if err != nil && !errors.Is(err, repository.ErrNotFound) {
-		return "", model.User{}, err
+		return Grant{}, err
 	}
 
 	if hash == "" {
@@ -102,33 +116,35 @@ func (s *Service) Login(
 
 	ok, err := VerifyPassword(hash, password)
 	if err != nil {
-		return "", model.User{}, fmt.Errorf("verify password of user %d: %w", user.ID, err)
+		return Grant{}, fmt.Errorf("verify password of user %d: %w", user.ID, err)
 	}
 
 	if !ok || user.ID == 0 || user.BlockedAt.Valid || hash == s.dummy {
-		s.limiter.fail(key, now)
-		return "", model.User{}, ErrBadCredentials
+		s.limiter.fail(key, now, policy.FailureWindow)
+		return Grant{}, ErrBadCredentials
 	}
 
 	s.limiter.reset(key)
 
 	token, tokenHash, err := newToken()
 	if err != nil {
-		return "", model.User{}, err
+		return Grant{}, err
 	}
 
-	if err = s.store.CreateSession(ctx, tokenHash, user.ID, now, now.Add(SessionTTL), userAgent); err != nil {
-		return "", model.User{}, err
+	if err = s.store.CreateSession(ctx, tokenHash, user.ID, now, now.Add(policy.SessionTTL), userAgent); err != nil {
+		return Grant{}, err
 	}
 
-	return token, user, nil
+	return Grant{Token: token, TTL: policy.SessionTTL, User: user}, nil
 }
 
-// Authenticate находит пользователя по токену сессии. renewed — срок
-// продлён, и cookie стоит выдать заново с новым сроком.
-func (s *Service) Authenticate(ctx context.Context, token string, now time.Time) (user model.User, renewed bool, err error) {
+// Authenticate находит пользователя по токену сессии. cookieTTL > 0 — срок
+// продлён, и cookie стоит выдать заново с этим сроком (Max-Age).
+func (s *Service) Authenticate(
+	ctx context.Context, token string, now time.Time,
+) (user model.User, cookieTTL time.Duration, err error) {
 	if token == "" {
-		return model.User{}, false, ErrNoSession
+		return model.User{}, 0, ErrNoSession
 	}
 
 	hash := hashToken(token)
@@ -136,27 +152,32 @@ func (s *Service) Authenticate(ctx context.Context, token string, now time.Time)
 	sess, err := s.store.SessionByToken(ctx, hash)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
-			return model.User{}, false, ErrNoSession
+			return model.User{}, 0, ErrNoSession
 		}
 
-		return model.User{}, false, err
+		return model.User{}, 0, err
 	}
 
 	// Блокировка удаляет сессии сама, но проверка повторяется здесь: правка
 	// в базе руками сессии не трогает.
 	if !now.Before(sess.ExpiresAt) || sess.User.BlockedAt.Valid {
-		return model.User{}, false, ErrNoSession
+		return model.User{}, 0, ErrNoSession
 	}
 
 	if now.Sub(sess.LastSeenAt) >= touchEvery {
-		if err = s.store.TouchSession(ctx, hash, now, now.Add(SessionTTL)); err != nil {
-			return model.User{}, false, err
+		policy, err := LoadPolicy(ctx, s.store)
+		if err != nil {
+			return model.User{}, 0, err
 		}
 
-		renewed = true
+		if err = s.store.TouchSession(ctx, hash, now, now.Add(policy.SessionTTL)); err != nil {
+			return model.User{}, 0, err
+		}
+
+		cookieTTL = policy.SessionTTL
 	}
 
-	return sess.User, renewed, nil
+	return sess.User, cookieTTL, nil
 }
 
 // Logout гасит сессию токена. Неизвестный токен — не ошибка: выйти из

@@ -69,14 +69,14 @@ func clientFrom(ctx context.Context) Client {
 }
 
 // SessionCookie — cookie сессии. HttpOnly — токен не виден JS;
-// SameSite=Lax — чужой сайт не отправит его фоновым POST. Срок совпадает
-// со скользящим сроком сессии и продлевается вместе с ним.
-func SessionCookie(token string, secure bool) string {
+// SameSite=Lax — чужой сайт не отправит его фоновым POST. ttl совпадает со
+// скользящим сроком сессии (settings, ключ auth) и продлевается вместе с ним.
+func SessionCookie(token string, secure bool, ttl time.Duration) string {
 	c := http.Cookie{
 		Name:     CookieName,
 		Value:    token,
 		Path:     "/",
-		MaxAge:   int(auth.SessionTTL / time.Second),
+		MaxAge:   int(ttl / time.Second),
 		HttpOnly: true,
 		Secure:   secure,
 		SameSite: http.SameSiteLaxMode,
@@ -91,7 +91,7 @@ func (h *Handler) Secure() bool { return h.secure }
 func (h *Handler) Login(ctx context.Context, req oas.LoginRequestObject) (oas.LoginResponseObject, error) {
 	c := clientFrom(ctx)
 
-	token, user, err := h.auth.Login(ctx, req.Body.Login, req.Body.Password, c.IP, c.UserAgent, h.now())
+	grant, err := h.auth.Login(ctx, req.Body.Login, req.Body.Password, c.IP, c.UserAgent, h.now())
 
 	var tooMany auth.TooManyAttempts
 	switch {
@@ -110,10 +110,10 @@ func (h *Handler) Login(ctx context.Context, req oas.LoginRequestObject) (oas.Lo
 		return nil, err
 	}
 
-	cookie := SessionCookie(token, h.secure)
+	cookie := SessionCookie(grant.Token, h.secure, grant.TTL)
 
 	return oas.Login200JSONResponse{
-		Body:    meDTO(user),
+		Body:    meDTO(grant.User),
 		Headers: oas.Login200ResponseHeaders{SetCookie: &cookie},
 	}, nil
 }

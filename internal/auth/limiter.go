@@ -5,13 +5,10 @@ import (
 	"time"
 )
 
-// Ограничение неудачных входов: не больше maxFailures за failureWindow на
-// пару «логин + адрес». Пара, а не один логин: иначе посторонний мог бы
-// запереть чужую учётную запись, перебирая её пароль со своего адреса.
-const (
-	maxFailures   = 5
-	failureWindow = 15 * time.Minute
-)
+// Ограничение неудачных входов: не больше limit неудач за окно span на пару
+// «логин + адрес». Пара, а не один логин: иначе посторонний мог бы запереть
+// чужую учётную запись, перебирая её пароль со своего адреса. Пороги приходят
+// из настроек (Policy) на каждый вызов — их меняют без перезапуска.
 
 // limiter считает неудачные входы в памяти процесса.
 //
@@ -32,7 +29,7 @@ func newLimiter() *limiter {
 }
 
 // blocked отвечает, заперт ли ключ, и на сколько ещё.
-func (l *limiter) blocked(key string, now time.Time) (bool, time.Duration) {
+func (l *limiter) blocked(key string, now time.Time, limit int, span time.Duration) (bool, time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -41,27 +38,27 @@ func (l *limiter) blocked(key string, now time.Time) (bool, time.Duration) {
 		return false, 0
 	}
 
-	end := w.start.Add(failureWindow)
+	end := w.start.Add(span)
 	if !now.Before(end) {
 		delete(l.hits, key)
 		return false, 0
 	}
 
-	if w.failures >= maxFailures {
+	if w.failures >= limit {
 		return true, end.Sub(now)
 	}
 
 	return false, 0
 }
 
-func (l *limiter) fail(key string, now time.Time) {
+func (l *limiter) fail(key string, now time.Time, span time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	// Заодно выметаются истёкшие окна: иначе карта росла бы на каждом
 	// новом адресе до перезапуска.
 	for k, w := range l.hits {
-		if !now.Before(w.start.Add(failureWindow)) {
+		if !now.Before(w.start.Add(span)) {
 			delete(l.hits, k)
 		}
 	}

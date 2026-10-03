@@ -23,9 +23,6 @@ const (
 	saltLen      = 16
 )
 
-// MinPasswordLen — нижняя граница длины пароля.
-const MinPasswordLen = 10
-
 var errBadHash = errors.New("неизвестный формат хеша пароля")
 
 // HashPassword считает хеш в PHC-формате:

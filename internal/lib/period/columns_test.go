@@ -19,7 +19,7 @@ func TestParseColumns(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		cols, err := ParseColumns(c.grain, []string{c.key})
+		cols, err := ParseColumns(c.grain, []string{c.key}, DefaultMaxColumns)
 		if err != nil {
 			t.Errorf("%s %s: %v", c.grain, c.key, err)
 			continue
@@ -34,7 +34,7 @@ func TestParseColumns(t *testing.T) {
 }
 
 func TestParseColumnsRejects(t *testing.T) {
-	many := make([]string, MaxColumns+1)
+	many := make([]string, DefaultMaxColumns+1)
 	for i := range many {
 		many[i] = time.Date(2020, time.Month(i+1), 1, 0, 0, 0, 0, time.UTC).Format("2006-01")
 	}
@@ -56,7 +56,7 @@ func TestParseColumnsRejects(t *testing.T) {
 	}
 
 	for name, c := range cases {
-		if _, err := ParseColumns(c.grain, c.keys); err == nil {
+		if _, err := ParseColumns(c.grain, c.keys, DefaultMaxColumns); err == nil {
 			t.Errorf("%s: ошибки нет", name)
 		}
 	}
@@ -64,7 +64,7 @@ func TestParseColumnsRejects(t *testing.T) {
 
 // По умолчанию — шесть месяцев по текущий, через границу года.
 func TestDefaultColumns(t *testing.T) {
-	cols := DefaultColumns(time.Date(2026, time.March, 31, 23, 0, 0, 0, time.UTC))
+	cols := DefaultColumns(time.Date(2026, time.March, 31, 23, 0, 0, 0, time.UTC), DefaultMonths)
 
 	keys := make([]string, len(cols))
 	for i, c := range cols {
@@ -73,5 +73,24 @@ func TestDefaultColumns(t *testing.T) {
 
 	if got := strings.Join(keys, ","); got != "2025-10,2025-11,2025-12,2026-01,2026-02,2026-03" {
 		t.Errorf("по умолчанию: %s", got)
+	}
+}
+
+// Потолок — параметр, а не константа: берётся из настройки.
+func TestParseColumnsCeilingIsAParameter(t *testing.T) {
+	keys := []string{"2026-01", "2026-02", "2026-03"}
+
+	if _, err := ParseColumns(Month, keys, 3); err != nil {
+		t.Errorf("три колонки при потолке 3: %v", err)
+	}
+	if _, err := ParseColumns(Month, keys, 2); err == nil {
+		t.Error("три колонки при потолке 2 прошли")
+	}
+	if _, err := ParseColumns(Month, keys, 20); err != nil {
+		t.Errorf("потолок выше 12 не работает: %v", err)
+	}
+
+	if got := len(DefaultColumns(time.Date(2026, time.March, 1, 0, 0, 0, 0, time.UTC), 3)); got != 3 {
+		t.Errorf("DefaultColumns(3) дал %d колонок", got)
 	}
 }

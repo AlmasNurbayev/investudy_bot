@@ -207,7 +207,7 @@ func session(h *handler.Handler, a *auth.Service) fiber.Handler {
 			return c.Next()
 		}
 
-		user, renewed, err := a.Authenticate(ctx, token, time.Now())
+		user, cookieTTL, err := a.Authenticate(ctx, token, time.Now())
 		if errors.Is(err, auth.ErrNoSession) {
 			return c.Status(fiber.StatusUnauthorized).JSON(oas.Error{Message: "Войдите заново"})
 		}
@@ -220,9 +220,9 @@ func session(h *handler.Handler, a *auth.Service) fiber.Handler {
 		}
 
 		// Срок сессии в базе продлён — продлеваем и cookie, иначе браузер
-		// выбросил бы её через 90 дней после входа при живой сессии.
-		if renewed {
-			c.Append(fiber.HeaderSetCookie, handler.SessionCookie(token, h.Secure()))
+		// выбросил бы её по истечении срока после входа при живой сессии.
+		if cookieTTL > 0 {
+			c.Append(fiber.HeaderSetCookie, handler.SessionCookie(token, h.Secure(), cookieTTL))
 		}
 
 		c.SetContext(auth.WithUser(ctx, user))

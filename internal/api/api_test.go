@@ -296,6 +296,158 @@ func TestPnlPolicyPerRole(t *testing.T) {
 	}
 }
 
+// Срок сессии берётся из settings: меняем настройку — меняется и Max-Age
+// cookie, и expires_at в базе, без перезапуска.
+func TestSessionTTLFromSettings(t *testing.T) {
+	e := setup(t)
+	e.user("cfo", access.CFO, 0, true)
+
+	ctx := context.Background()
+
+	e.setSetting("auth", `{"session_ttl_days": 30, "login_max_failures": 5, "login_window_minutes": 15, "min_password_length": 10}`)
+
+	resp := e.do(http.MethodPost, "/api/auth/login", "", oas.LoginRequest{Login: "cfo", Password: password})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("login: %d %s", resp.StatusCode, read(resp))
+	}
+
+	var maxAge int
+	for _, c := range resp.Cookies() {
+		if c.Name == handler.CookieName {
+			maxAge = c.MaxAge
+		}
+	}
+	if want := 30 * 24 * 3600; maxAge != want {
+		t.Errorf("Max-Age = %d, ждали %d (30 дней)", maxAge, want)
+	}
+
+	var days float64
+	err := e.pool.QueryRow(ctx, `SELECT extract(epoch FROM (expires_at - created_at)) / 86400 FROM sessions`).Scan(&days)
+	if err != nil || days < 29.99 || days > 30.01 {
+		t.Errorf("expires_at - created_at = %.2f дней, err=%v, ждали 30", days, err)
+	}
+
+	// Нуль в настройке — срок по умолчанию в 1 день, вход не ломается.
+	e.setSetting("auth", `{"session_ttl_days": 0}`)
+	resp = e.do(http.MethodPost, "/api/auth/login", "", oas.LoginRequest{Login: "cfo", Password: password})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("session_ttl_days=0: %d, ждали 200", resp.StatusCode)
+	}
+	for _, c := range resp.Cookies() {
+		if c.Name == handler.CookieName && c.MaxAge != 24*3600 {
+			t.Errorf("Max-Age = %d, ждали сутки", c.MaxAge)
+		}
+	}
+}
+
+// setSetting меняет настройку в общей базе и возвращает прежнее значение при
+// выходе из теста: следующие тесты ждут сид миграции.
+func (e *env) setSetting(key, value string) {
+	e.t.Helper()
+
+	ctx := context.Background()
+
+	var old, description string
+	err := e.pool.QueryRow(ctx, `SELECT value::text, coalesce(description, '') FROM settings WHERE key = $1`, key).
+		Scan(&old, &description)
+	if err != nil {
+		e.t.Fatalf("read setting %s: %v", key, err)
+	}
+
+	// Upsert, а не UPDATE: тест может удалить строку вовсе (проверка «нет
+	// настройки»), и восстановить её надо целиком, с описанием.
+	e.t.Cleanup(func() {
+		_, _ = e.pool.Exec(ctx, `
+			INSERT INTO settings (key, value, description) VALUES ($1, $2, nullif($3, ''))
+			ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, description = EXCLUDED.description`,
+			key, old, description)
+	})
+
+	if _, err := e.pool.Exec(ctx, `UPDATE settings SET value = $2 WHERE key = $1`, key, value); err != nil {
+		e.t.Fatalf("set setting %s: %v", key, err)
+	}
+}
+
+// Потолок колонок и месяцы по умолчанию — из settings (ключ pnl), и потолок
+// доезжает до фронта в ответе.
+func TestPnlLimitsFromSettings(t *testing.T) {
+	e := setup(t)
+	e.user("cfo", access.CFO, 0, true)
+	cookie := e.login("cfo")
+
+	report := func(query string) (int, oas.PnlReport) {
+		resp := e.do(http.MethodGet, "/api/pnl"+query, cookie, nil)
+		if resp.StatusCode != http.StatusOK {
+			return resp.StatusCode, oas.PnlReport{}
+		}
+
+		return resp.StatusCode, decode[oas.PnlReport](t, resp)
+	}
+
+	// Сид миграции: 12 колонок, 6 месяцев по умолчанию.
+	if code, r := report(""); code != http.StatusOK || r.MaxColumns != 12 || len(r.Columns) != 6 {
+		t.Fatalf("по умолчанию: %d, max_columns=%d, колонок %d", code, r.MaxColumns, len(r.Columns))
+	}
+
+	e.setSetting("pnl", `{"default_months": 3, "max_columns": 2}`)
+
+	if code, r := report(""); code != http.StatusOK || r.MaxColumns != 2 || len(r.Columns) != 2 {
+		t.Errorf("месяцев 3 при потолке 2 должно быть 2 колонки: %d, max_columns=%d, колонок %d", code, r.MaxColumns, len(r.Columns))
+	}
+	if code, _ := report("?cols=2026-01,2026-02"); code != http.StatusOK {
+		t.Errorf("две колонки при потолке 2: %d", code)
+	}
+	if code, _ := report("?cols=2026-01,2026-02,2026-03"); code != http.StatusBadRequest {
+		t.Errorf("три колонки при потолке 2: %d, ждали 400", code)
+	}
+
+	// Потолок можно поднять выше прежних 12.
+	e.setSetting("pnl", `{"default_months": 6, "max_columns": 20}`)
+
+	if code, r := report("?cols=2025-01,2025-02,2025-03,2025-04,2025-05,2025-06,2025-07,2025-08,2025-09,2025-10,2025-11,2025-12,2026-01"); code != http.StatusOK || r.MaxColumns != 20 {
+		t.Errorf("13 колонок при потолке 20: %d, max_columns=%d", code, r.MaxColumns)
+	}
+
+	// Строки нет вовсе — значения из кода, отчёт не падает. setSetting выше
+	// уже запомнил исходную строку и вернёт её целиком.
+	if _, err := e.pool.Exec(context.Background(), `DELETE FROM settings WHERE key = 'pnl'`); err != nil {
+		t.Fatal(err)
+	}
+	if code, r := report(""); code != http.StatusOK || r.MaxColumns != 12 || len(r.Columns) != 6 {
+		t.Errorf("без настройки: %d, max_columns=%d, колонок %d, ждали 12 и 6", code, r.MaxColumns, len(r.Columns))
+	}
+}
+
+// Минимальная длина пароля — из settings (ключ auth): и при заведении, и при
+// смене пароля.
+func TestMinPasswordLengthFromSettings(t *testing.T) {
+	e := setup(t)
+	admin := e.user("cfo", access.CFO, 0, true)
+	cookie := e.login("cfo")
+
+	login, pw := "newbie", "fifteen chars!!!"
+	create := func() int {
+		return e.do(http.MethodPost, "/api/admin/users", cookie,
+			oas.UserCreate{Login: &login, Password: &pw, Role: oas.Coo}).StatusCode
+	}
+
+	e.setSetting("auth", `{"session_ttl_days": 90, "login_max_failures": 5, "login_window_minutes": 15, "min_password_length": 20}`)
+
+	if code := create(); code != http.StatusBadRequest {
+		t.Errorf("пароль из 15 знаков при минимуме 20: %d, ждали 400", code)
+	}
+	if code := e.do(http.MethodPut, "/api/admin/users/"+itoa(admin.ID)+"/password", cookie,
+		oas.PasswordSet{Password: pw}).StatusCode; code != http.StatusBadRequest {
+		t.Errorf("смена на короткий пароль: %d, ждали 400", code)
+	}
+
+	e.setSetting("auth", `{"session_ttl_days": 90, "login_max_failures": 5, "login_window_minutes": 15, "min_password_length": 8}`)
+
+	if code := create(); code != http.StatusCreated {
+		t.Errorf("пароль из 15 знаков при минимуме 8: %d, ждали 201", code)
+	}
+}
+
 // Ответ входа несёт пользователя: id, роль, имя, подразделение руководителя —
 // фронту не нужен второй запрос. Тело то же, что у /api/me.
 func TestLoginResponse(t *testing.T) {
