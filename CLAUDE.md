@@ -112,6 +112,7 @@ REST API на fiber v3 — демон, как бот. **Подробно — [do
 - Доступ закрыт по умолчанию: без сессии — только пути из `public` в
   `internal/api/server.go`; права администратора — по префиксу `/api/admin/`.
   Маршрутизация строгая и чувствительная к регистру — иначе префикс обходится.
+- Остановка — штатная `ShutdownWithTimeout` fiber + отмена контекста запросов хуком `OnPreShutdown`; `c.RequestCtx()` как родителя контекста не использовать (гонка, ловится `-race` в CI).
 - Тексты ответов — в `internal/api/handler`; проверки пользователей, которых нет
   в базе, — в `internal/users`.
 
@@ -224,7 +225,6 @@ REST API на fiber v3 — демон, как бот. **Подробно — [do
 make help              # список целей
 make dev-parser        # один прогон парсера
 make dev-api           # REST API локально (cookie без Secure)
-make create-admin LOGIN=almas   # первый администратор сайта
 make generate          # сервер из api/openapi.yaml
 make migrate-up        # накатить миграции
 make migrate-down      # откатить последнюю
@@ -257,7 +257,7 @@ investudy_bot/
 │   ├── migrator/      # миграции
 │   ├── prunedb/       # чистка истории
 │   ├── bot/           # Telegram-бот
-│   └── api/           # REST API (+ -create-admin)
+│   └── api/           # REST API
 ├── internal/
 │   ├── config/        # env → структуры (caarlos0/env)
 │   ├── db/            # подключение к Postgres: Conn для команд, Pool для демонов

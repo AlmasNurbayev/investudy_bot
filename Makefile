@@ -44,11 +44,6 @@ dev-bot: ## запустить бота локально (демон, до Ctrl+
 dev-api: ## запустить REST API локально (демон, до Ctrl+C)
 	TZ=Asia/Almaty API_COOKIE_SECURE=false go run ./cmd/api
 
-.PHONY: create-admin
-create-admin: ## завести администратора сайта (LOGIN=..., пароль спросит)
-	@test -n "$(LOGIN)" || { echo "make create-admin LOGIN=almas"; exit 1; }
-	go run ./cmd/api -create-admin -login $(LOGIN)
-
 .PHONY: generate
 generate: ## перегенерировать сервер из api/openapi.yaml
 	go generate ./internal/api/oas/

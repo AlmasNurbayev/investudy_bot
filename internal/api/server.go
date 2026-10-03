@@ -10,7 +10,6 @@ import (
 	"net"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -32,37 +31,9 @@ var public = map[string]bool{
 
 const adminPrefix = "/api/admin/"
 
-// Server — приложение и его остановка.
-//
-// Каждый запрос получает контекст от base с таймаутом запроса: запросы к базе
-// не висят дольше DB_TIMEOUT, а при остановке их можно прервать разом. Без
-// этого незавершённый запрос пережил бы Listen (fiber возвращается из него,
-// как только закрыт приёмник, не дожидаясь запросов), держал бы соединение,
-// и pool.Close в main ждал бы его сколько угодно — пока Docker не убьёт
-// процесс SIGKILL, — а сам запрос упал бы на закрытом пуле.
-type Server struct {
-	app     *fiber.App
-	timeout time.Duration
-
-	base  context.Context
-	abort context.CancelFunc
-	// inflight — запросы, которые ещё выполняются.
-	inflight sync.WaitGroup
-}
-
-// abortWait — сколько ждать прерванные запросы после отмены их контекста.
-// pgx на отмену шлёт Postgres CancelRequest и возвращается быстро; дольше
-// ждать значило бы упереться в SIGKILL от Docker.
-const abortWait = 2 * time.Second
-
-// flushWait — сколько после конца запросов ждать, пока fiber допишет ответы
-// и закроет соединения: обработчик вернулся раньше, чем ответ ушёл клиенту.
-const flushWait = time.Second
-
 // New собирает приложение. requestTimeout — потолок одного запроса (DB_TIMEOUT).
-func New(h *handler.Handler, a *auth.Service, requestTimeout time.Duration) *Server {
-	s := newServer(requestTimeout)
-	app := s.app
+func New(h *handler.Handler, a *auth.Service, requestTimeout time.Duration) *fiber.App {
+	app := newApp(requestTimeout)
 
 	app.Use(recoverer.New())
 	app.Use(accessLog)
@@ -83,17 +54,13 @@ func New(h *handler.Handler, a *auth.Service, requestTimeout time.Duration) *Ser
 
 	oas.RegisterHandlers(app, oas.NewStrictHandler(h, nil))
 
-	return s
+	return app
 }
 
-// newServer — приложение с учётом запросов, но без маршрутов: на нём же
-// тестируется остановка.
-func newServer(requestTimeout time.Duration) *Server {
-	base, abort := context.WithCancel(context.Background())
-
-	s := &Server{timeout: requestTimeout, base: base, abort: abort}
-
-	s.app = fiber.New(fiber.Config{
+// newApp — приложение с настройками и контекстом запроса, но без маршрутов:
+// на нём же тестируется остановка.
+func newApp(requestTimeout time.Duration) *fiber.App {
+	app := fiber.New(fiber.Config{
 		ErrorHandler: errorHandler,
 		// Маршрут совпадает только с путём буква в букву. Иначе /API/admin/users
 		// дошёл бы до админской ручки мимо проверки префикса /api/admin/ в
@@ -106,59 +73,67 @@ func newServer(requestTimeout time.Duration) *Server {
 		TrustProxy:       true,
 		TrustProxyConfig: fiber.TrustProxyConfig{Loopback: true, Private: true},
 		ProxyHeader:      "X-Real-IP",
-		// Остановка не закрывает keep-alive соединения сама (ShutdownWithContext),
-		// поэтому простаивающее соединение не должно жить бесконечно.
+		// Документация Shutdown*: keep-alive соединения остановка сама не
+		// закрывает, и таймаут чтения рекомендуется ненулевой.
 		IdleTimeout: 60 * time.Second,
 	})
 
+	// Контекст всех запросов отменяется в начале остановки — хуком fiber
+	// OnPreShutdown, который ShutdownWithTimeout вызывает первым делом.
+	// Свой контекст, а не c.RequestCtx(): fasthttp тоже отменяет его при
+	// остановке, но как родитель context.WithTimeout он небезопасен — его
+	// значения читает горутина отмены, пока fiber в них пишет (детектор
+	// гонок это ловит).
+	shutdown, cancel := context.WithCancel(context.Background())
+	app.Hooks().OnPreShutdown(func() error {
+		cancel()
+		return nil
+	})
+
 	// Первым: всё, что ниже, работает уже в контексте запроса.
-	s.app.Use(s.track)
+	app.Use(requestContext(shutdown, requestTimeout))
 
-	return s
+	return app
 }
 
-// App — приложение fiber; нужно тестам (app.Test).
-func (s *Server) App() *fiber.App { return s.app }
+// requestContext даёт обработчикам контекст запроса: отменяется остановкой
+// сервера и ограничен таймаутом DB_TIMEOUT. Через него pgx и отменяет
+// запросы к базе: без этого (c.Context() по умолчанию пустой) запрос к базе
+// не замечал ни остановки, ни таймаута и висел сколько угодно.
+func requestContext(shutdown context.Context, timeout time.Duration) fiber.Handler {
+	return func(c fiber.Ctx) error {
+		ctx, cancel := context.WithTimeout(shutdown, timeout)
+		defer cancel()
 
-// track считает запрос незавершённым до его конца и даёт ему контекст с
-// таймаутом, производный от base.
-func (s *Server) track(c fiber.Ctx) error {
-	s.inflight.Add(1)
-	defer s.inflight.Done()
+		c.SetContext(ctx)
 
-	ctx, cancel := context.WithTimeout(s.base, s.timeout)
-	defer cancel()
-
-	c.SetContext(ctx)
-
-	return c.Next()
+		return c.Next()
+	}
 }
 
-// Run слушает addr до отмены ctx и останавливается штатно (см. serve).
-func (s *Server) Run(ctx context.Context, addr string, grace time.Duration) error {
+// Run слушает addr до отмены ctx и останавливается средствами fiber.
+func Run(ctx context.Context, app *fiber.App, addr string, grace time.Duration) error {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", addr, err)
 	}
 
-	return s.serve(ctx, ln, grace)
+	return serve(ctx, app, ln, grace)
 }
 
-// serve обслуживает ln до отмены ctx. Остановка:
+// serve — по документации fiber: Listen в горутине, по сигналу —
+// ShutdownWithTimeout, и дождаться его. Он закрывает приёмник, отменяет
+// контексты запросов (запросы к базе прерываются), ждёт, пока запросы
+// допишут ответы, и через grace рвёт оставшиеся соединения.
 //
-//  1. приёмник закрывается — новых запросов нет;
-//  2. начатые запросы получают grace на то, чтобы закончиться самим;
-//  3. оставшиеся прерываются отменой контекста — запросы к базе отменяются;
-//  4. возврат — только когда запросов не осталось (или вышел abortWait),
-//     и лишь после этого main закрывает пул.
-func (s *Server) serve(ctx context.Context, ln net.Listener, grace time.Duration) error {
-	defer s.abort()
-
-	s.logRoutes()
+// Ждать его обязательно: Listen возвращается, как только закрыт приёмник,
+// не дожидаясь запросов, и pool.Close в main иначе закрыл бы пул под ними.
+func serve(ctx context.Context, app *fiber.App, ln net.Listener, grace time.Duration) error {
+	logRoutes(app)
 	logger.INF("api started", "addr", ln.Addr().String())
 
 	errCh := make(chan error, 1)
-	go func() { errCh <- s.app.Listener(ln, fiber.ListenConfig{DisableStartupMessage: true}) }()
+	go func() { errCh <- app.Listener(ln, fiber.ListenConfig{DisableStartupMessage: true}) }()
 
 	select {
 	case err := <-errCh:
@@ -168,48 +143,11 @@ func (s *Server) serve(ctx context.Context, ln net.Listener, grace time.Duration
 
 	logger.INF("api stopping", "grace", grace)
 
-	graceCtx, cancel := context.WithTimeout(context.Background(), grace)
-	defer cancel()
-
-	// Остановка fiber — в фоне: приёмник она закрывает сразу, а потом ждёт,
-	// пока закроются соединения. Ждать её до конца grace нельзя — keep-alive
-	// соединение клиента может растянуть каждую остановку на весь grace, —
-	// поэтому конец работы считается по запросам (их считает track), а её
-	// конец ждётся коротко, в flushWait: только чтобы готовые ответы успели
-	// уйти клиентам до выхода процесса.
-	shutdownDone := make(chan struct{})
-	go func() {
-		defer close(shutdownDone)
-
-		if err := s.app.ShutdownWithContext(graceCtx); err != nil && !errors.Is(err, context.DeadlineExceeded) &&
-			!errors.Is(err, context.Canceled) {
-			logger.ERROR("api shutdown", "err", err)
-		}
-	}()
-
-	done := make(chan struct{})
-	go func() {
-		s.inflight.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-graceCtx.Done():
-		logger.WRN("api: запросы не уложились в остановку, прерываю", "grace", grace)
-		s.abort()
-
-		select {
-		case <-done:
-		case <-time.After(abortWait):
-			logger.ERROR("api: прерванные запросы не завершились", "wait", abortWait)
-		}
+	if err := app.ShutdownWithTimeout(grace); err != nil {
+		logger.WRN("api: соединения закрыты принудительно", "grace", grace, "err", err)
 	}
 
-	select {
-	case <-shutdownDone:
-	case <-time.After(flushWait):
-	}
+	<-errCh
 
 	logger.INF("api stopped")
 
@@ -218,8 +156,8 @@ func (s *Server) serve(ctx context.Context, ln net.Listener, grace time.Duration
 
 // logRoutes пишет в лог все маршруты: что именно слушает этот бинарник,
 // видно сразу при старте, без чтения кода и контракта.
-func (s *Server) logRoutes() {
-	routes := s.app.GetRoutes(true)
+func logRoutes(app *fiber.App) {
+	routes := app.GetRoutes(true)
 
 	slices.SortFunc(routes, func(a, b fiber.Route) int {
 		return cmp.Or(cmp.Compare(a.Path, b.Path), cmp.Compare(a.Method, b.Method))

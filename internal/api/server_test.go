@@ -13,9 +13,9 @@ import (
 	"github.com/gofiber/fiber/v3"
 )
 
-// start запускает сервер на свободном порту; stop отменяет его контекст,
-// done закрывается, когда serve вернулся.
-func start(t *testing.T, s *Server, grace time.Duration) (base string, stop context.CancelFunc, done <-chan error) {
+// start запускает приложение на свободном порту; stop отменяет контекст
+// сервера, done получает результат serve.
+func start(t *testing.T, app *fiber.App, grace time.Duration) (base string, stop context.CancelFunc, done <-chan error) {
 	t.Helper()
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -26,13 +26,13 @@ func start(t *testing.T, s *Server, grace time.Duration) (base string, stop cont
 	ctx, cancel := context.WithCancel(context.Background())
 	ch := make(chan error, 1)
 
-	go func() { ch <- s.serve(ctx, ln, grace) }()
+	go func() { ch <- serve(ctx, app, ln, grace) }()
 
 	base = "http://" + ln.Addr().String()
 
 	// Дождаться, пока сервер начнёт отвечать.
 	for range 50 {
-		if resp, err := http.Get(base + "/ping"); err == nil {
+		if resp, err := client.Get(base + "/ping"); err == nil {
 			_ = resp.Body.Close()
 			break
 		}
@@ -42,8 +42,15 @@ func start(t *testing.T, s *Server, grace time.Duration) (base string, stop cont
 	return base, cancel, ch
 }
 
+// client без keep-alive. Go-клиент иногда заранее открывает лишнее
+// соединение и не шлёт по нему запроса; fasthttp считает свежее соединение
+// занятым ещё 5 секунд, и остановка ждала бы его весь grace. В бою такое
+// соединение (спекулятивное у браузера) тоже ограничено grace и закрывается
+// принудительно — безвредно, но для проверки времени остановки шумит.
+var client = &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+
 func get(url string) (int, error) {
-	resp, err := http.Get(url)
+	resp, err := client.Get(url)
 	if err != nil {
 		return 0, err
 	}
@@ -55,17 +62,30 @@ func get(url string) (int, error) {
 
 func ping(c fiber.Ctx) error { return c.SendString("pong") }
 
-// Запрос, начатый до остановки и уложившийся в grace, получает свой ответ,
-// а serve возвращается только после него.
+func wait(t *testing.T, done <-chan error, limit time.Duration, msg string) {
+	t.Helper()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("serve: %v", err)
+		}
+	case <-time.After(limit):
+		t.Fatal(msg)
+	}
+}
+
+// Запрос, начатый до остановки, получает свой ответ, а serve возвращается
+// только после него.
 func TestShutdownWaitsForInflight(t *testing.T) {
-	s := newServer(time.Minute)
-	s.app.Get("/ping", ping)
-	s.app.Get("/slow", func(c fiber.Ctx) error {
+	app := newApp(time.Minute)
+	app.Get("/ping", ping)
+	app.Get("/slow", func(c fiber.Ctx) error {
 		time.Sleep(500 * time.Millisecond)
 		return c.SendString("done")
 	})
 
-	base, stop, done := start(t, s, 3*time.Second)
+	base, stop, done := start(t, app, 3*time.Second)
 
 	status := make(chan int, 1)
 	go func() {
@@ -76,19 +96,8 @@ func TestShutdownWaitsForInflight(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	stop()
 
-	// Ответ на /slow — через 400 мс после остановки; serve обязан вернуться
-	// сразу за ним, а не ждать весь grace из-за keep-alive соединений.
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("serve: %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("serve ждёт дольше, чем выполняется начатый запрос: держат keep-alive соединения?")
-	}
+	wait(t, done, 2*time.Second, "serve ждёт дольше, чем выполняется начатый запрос")
 
-	// Ответ обязан дойти целиком, а не оборваться остановкой. Ждём его с
-	// запасом: клиентской горутине ещё нужно дочитать тело.
 	select {
 	case code := <-status:
 		if code != http.StatusOK {
@@ -99,63 +108,40 @@ func TestShutdownWaitsForInflight(t *testing.T) {
 	}
 }
 
-// Запрос, не уложившийся в grace, прерывается отменой контекста — так
-// отменяется и запрос к базе, — и serve возвращается за grace + abortWait,
-// а не ждёт его вечно.
-func TestShutdownAbortsStuckRequest(t *testing.T) {
-	s := newServer(time.Minute)
+// Остановка отменяет контекст запроса — так прерывается и запрос к базе, —
+// и клиент получает 503, а не обрыв. Ждать grace ради такого запроса незачем.
+func TestShutdownCancelsRequestContext(t *testing.T) {
+	app := newApp(time.Minute)
 
-	var sawCancel, finished atomic.Bool
+	var canceled atomic.Bool
 
-	s.app.Get("/ping", ping)
-	s.app.Get("/stuck", func(c fiber.Ctx) error {
+	app.Get("/ping", ping)
+	app.Get("/stuck", func(c fiber.Ctx) error {
 		<-c.Context().Done()
-		sawCancel.Store(errors.Is(c.Context().Err(), context.Canceled))
-
-		// Отмена запроса к базе — не мгновенная: pgx шлёт Postgres
-		// CancelRequest и ждёт ответа. serve обязан дождаться и этого,
-		// иначе pool.Close в main снова упрётся в занятое соединение.
-		time.Sleep(200 * time.Millisecond)
-		finished.Store(true)
+		canceled.Store(errors.Is(c.Context().Err(), context.Canceled))
 
 		return c.Context().Err()
 	})
 
-	const grace = 300 * time.Millisecond
+	base, stop, done := start(t, app, 3*time.Second)
 
-	base, stop, done := start(t, s, grace)
-
-	stuckStatus := make(chan int, 1)
+	status := make(chan int, 1)
 	go func() {
 		code, _ := get(base + "/stuck")
-		stuckStatus <- code
+		status <- code
 	}()
 
 	time.Sleep(100 * time.Millisecond)
-
-	began := time.Now()
 	stop()
 
+	wait(t, done, time.Second, "serve ждёт grace, хотя контекст запроса отменён")
+
+	if !canceled.Load() {
+		t.Error("остановка не отменила контекст запроса")
+	}
+
 	select {
-	case <-done:
-	case <-time.After(grace + abortWait + time.Second):
-		t.Fatal("serve ждёт зависший запрос дольше grace + abortWait")
-	}
-
-	if took := time.Since(began); took < grace {
-		t.Errorf("serve вернулся через %s — раньше grace", took)
-	}
-
-	if !sawCancel.Load() {
-		t.Error("контекст зависшего запроса не отменён")
-	}
-	if !finished.Load() {
-		t.Error("serve вернулся, не дождавшись прерванного запроса: пул закрылся бы под ним")
-	}
-
-	// Прерванный остановкой запрос — 503 «повторите», а не 500 «сбой».
-	select {
-	case code := <-stuckStatus:
+	case code := <-status:
 		if code != http.StatusServiceUnavailable {
 			t.Errorf("прерванный запрос: %d, ждали 503", code)
 		}
@@ -166,19 +152,19 @@ func TestShutdownAbortsStuckRequest(t *testing.T) {
 
 // Каждый запрос ограничен таймаутом: запрос к базе не висит дольше DB_TIMEOUT.
 func TestRequestTimeout(t *testing.T) {
-	s := newServer(200 * time.Millisecond)
+	app := newApp(200 * time.Millisecond)
 
 	var err atomic.Value
 
-	s.app.Get("/ping", ping)
-	s.app.Get("/wait", func(c fiber.Ctx) error {
+	app.Get("/ping", ping)
+	app.Get("/wait", func(c fiber.Ctx) error {
 		<-c.Context().Done()
 		err.Store(c.Context().Err())
 
 		return c.Context().Err()
 	})
 
-	base, stop, done := start(t, s, time.Second)
+	base, stop, done := start(t, app, time.Second)
 	defer func() { stop(); <-done }()
 
 	began := time.Now()

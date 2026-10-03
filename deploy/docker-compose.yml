@@ -63,8 +63,6 @@ services:
 
   # REST API веб-ОПиУ. Порт открыт только на loopback: снаружи API закрывает
   # nginx (same-origin, /api → сюда), прямого доступа из сети быть не должно.
-  # Первый администратор сайта:
-  #   docker compose exec api /app/api -create-admin -login almas
   api:
     image: "almasnurbayev/investudy_bot:latest"
     restart: unless-stopped

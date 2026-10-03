@@ -9,7 +9,6 @@ package users
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 
@@ -128,23 +127,6 @@ func (s *Service) SetPassword(ctx context.Context, id int64, password string) er
 	}
 
 	return s.store.SetPassword(ctx, id, hash)
-}
-
-// CreateAdmin — первый администратор сайта (cmd/api -create-admin).
-func (s *Service) CreateAdmin(ctx context.Context, login, username string, role access.Role, password string) (model.User, error) {
-	in := model.UserInput{
-		Login:    null.StringFrom(login),
-		Username: null.NewString(username, username != ""),
-		Role:     string(role),
-		IsAdmin:  true,
-	}
-
-	user, err := s.Create(ctx, in, password)
-	if errors.Is(err, repository.ErrConflict) {
-		return model.User{}, fmt.Errorf("логин %q уже занят: %w", login, err)
-	}
-
-	return user, err
 }
 
 // Validate проверяет поля пользователя сами по себе.
