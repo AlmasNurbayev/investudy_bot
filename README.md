@@ -11,16 +11,24 @@ Google Sheets → PostgreSQL → Telegram-бот (Go) и REST API с веб-ин
 | **cmd/migrator/** | миграции БД (golang-migrate)                 | одноразовый, стартует до сервисов |
 | **cmd/prunedb/**  | чистка истории снепшотов (`-scheme monthly`) | одноразовый, запускается кроном   |
 | **cmd/bot/**      | Telegram-бот, читает из PostgreSQL           | демон                             |
-| **cmd/api/**      | REST API на fiber, читает из PostgreSQL      | демон, проектируется              |
+| **cmd/api/**      | REST API на fiber, читает из PostgreSQL      | демон                             |
 
 ## Веб-ОПиУ
 
-Рядом с ботом появляются REST-бэкенд (`cmd/api`) и SPA на React: отчёт о прибылях и
-убытках по денежным операциям — месячный, квартальный, годовой и оперативный недельный,
-дашборд, детальные данные с выгрузкой в XLSX/PDF и админка пользователей. Кода пока нет,
-решения приняты.
+Рядом с ботом работает REST-бэкенд (`cmd/api`), следом будет SPA на React: отчёт о
+прибылях и убытках по денежным операциям — месячный, квартальный, годовой и оперативный
+недельный, дашборд, детальные данные с выгрузкой в XLSX/PDF и админка пользователей.
 
-- [docs/plans/pnl-architecture.md](docs/plans/pnl-architecture.md) — принятые решения, схема данных, контракт API. Главный документ: где более ранние расходятся с ним, верен он.
+Сделано (этапы 1–4 плана):
+
+- миграции `000003` (пользователи с логином и паролем, сессии, структура ОПиУ с сидом) и `000004` (настройки сайта в `settings`);
+- движок отчёта `internal/pnl` и политика доступа `internal/access` — один экземпляр на бот и API;
+- `cmd/api`: вход по логину и паролю (argon2id, сессия в cookie), `/api/me`, список срезов, ОПиУ, админка пользователей (ручки), Swagger на `/api/docs`; контракт — `api/openapi.yaml`, сервер из него генерируется (`make generate`).
+
+Не сделано: SPA (этап 5), дашборд, детальные данные и выгрузка, недельный расчёт.
+
+- [docs/plans/pnl-architecture.md](docs/plans/pnl-architecture.md) — принятые решения, схема данных, контракт API, порядок работ. Главный документ: где более ранние расходятся с ним, верен он.
+- [docs/api.md](docs/api.md) — устройство `cmd/api`: остановка и таймауты, сессии, пользователи, отчёт.
 - [docs/pnl-structure.md](docs/pnl-structure.md) — строки отчёта, отбор по статьям, границы доступа по ролям.
 - [docs/frontend.md](docs/frontend.md), [docs/backend.md](docs/backend.md) — исходные требования к сайту и API.
 - [docs/plans/pnl-web.md](docs/plans/pnl-web.md) — рабочий документ обсуждения; вход через Telegram Login Widget и роли в нём устарели.
@@ -33,6 +41,9 @@ Google Sheets → PostgreSQL → Telegram-бот (Go) и REST API с веб-ин
 
 - [CLAUDE.md](CLAUDE.md) — архитектура и принятые решения
 - [CONTEXT.md](CONTEXT.md) — словарь терминов проекта
+- [docs/api.md](docs/api.md) — REST API
+- [docs/bot.md](docs/bot.md) — Telegram-бот
+- [docs/source-data.md](docs/source-data.md) — колонки листа и справочники
 - [docs/parser.md](docs/parser.md) — особенности разбора листа
 - [docs/data-versioning.md](docs/data-versioning.md) — версионирование `data` снепшотами
 - [docs/deploy.md](docs/deploy.md) — деплой
@@ -43,6 +54,8 @@ Google Sheets → PostgreSQL → Telegram-бот (Go) и REST API с веб-ин
 ```bash
 make help              # список целей
 make dev-parser        # один прогон парсера
+make dev-api           # REST API локально (cookie без Secure)
+make generate          # сервер из api/openapi.yaml
 make migrate-up        # накатить миграции
 make build             # бинарники в _bin/
 make check             # fmt + vet + lint + test
@@ -53,3 +66,8 @@ make up / down / logs  # стенд из docker-compose.yml
 
 - [ ] Выдачу /closed_reports изменить на rich messages
 - [x] При запуске парсера из контейнера не видит JSON, так как не примонтирован — подвязать папку
+
+### API
+
+- [ ] Чистка старых сессий. Сейчас при входе удаляются только просроченные сессии самого входящего пользователя, чужие копятся. Решить: отдельный одноразовый бинарь по крону (как `cmd/prunedb`) или хранить сессии в Redis с TTL (предлагалось с самого начала, тогда чистка не нужна)
+- [ ] Админка управления пользователями: список, заведение, правка роли и подразделения, блокировка, смена пароля, флаг `is_admin` (ручки `/api/admin/users` есть, интерфейса нет)
