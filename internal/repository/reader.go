@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -59,6 +60,23 @@ func (r *Reader) ListSnapshots(ctx context.Context, limit int) ([]model.Snapshot
 	}
 
 	return snapshots, nil
+}
+
+// SnapshotByID — версия среза по id; ErrNotFound, если её нет (например,
+// удалена prunedb).
+func (r *Reader) SnapshotByID(ctx context.Context, id int64) (model.Snapshot, error) {
+	const query = `SELECT id, taken_at, row_count, year, month, week FROM snapshots WHERE id = $1`
+
+	var s model.Snapshot
+	if err := r.db.QueryRow(ctx, query, id).Scan(&s.ID, &s.TakenAt, &s.RowCount, &s.Year, &s.Month, &s.Week); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return model.Snapshot{}, ErrNotFound
+		}
+
+		return model.Snapshot{}, fmt.Errorf("snapshot %d: %w", id, err)
+	}
+
+	return s, nil
 }
 
 // ClosedReport считает сводку по периоду [from, to) внутри одной версии среза.

@@ -177,7 +177,7 @@ CREATE TABLE pnl_lines (
     id        SERIAL PRIMARY KEY,
     code      TEXT UNIQUE NOT NULL,          -- '1.1', '4'
     title     TEXT NOT NULL,
-    kind      TEXT NOT NULL CHECK (kind IN ('section', 'total')),
+    kind      TEXT NOT NULL,                  -- 'section' | 'total'
     sort      INT  UNIQUE NOT NULL,           -- порядок сверху вниз
     expand    TEXT[] NOT NULL DEFAULT '{}'    -- '{division,sub_item}', только для section
 );
@@ -186,7 +186,7 @@ CREATE TABLE pnl_lines (
 -- или отсутствует здесь вовсе — тогда «не размечена» и попадает в счётчик.
 -- Имя, а не FK: статья может быть размечена раньше, чем появится её первая проводка.
 CREATE TABLE pnl_item_map (
-    item_name TEXT PRIMARY KEY CHECK (item_name = lower(btrim(item_name))),
+    item_name TEXT PRIMARY KEY,               -- строчными, без пробелов по краям
     line_id   INT REFERENCES pnl_lines(id)
 );
 
@@ -254,13 +254,11 @@ users (
     password_hash TEXT,
     telegram_id   BIGINT UNIQUE,               -- NULL — только сайт
     username      TEXT,
-    role          TEXT NOT NULL CHECK (role IN ('division_head','coo','cco','founder','cfo')),
+    role          TEXT NOT NULL,               -- division_head|coo|cco|founder|cfo
     division_id   INT REFERENCES divisions(id),
     is_admin      BOOLEAN NOT NULL DEFAULT false,
     blocked_at    TIMESTAMPTZ,
-    created_at, updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CHECK ((role = 'division_head') = (division_id IS NOT NULL)),
-    CHECK (login IS NOT NULL OR telegram_id IS NOT NULL)
+    created_at, updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 )
 
 sessions (
@@ -271,11 +269,18 @@ sessions (
 )
 ```
 
+- Проверки — в Go, не в базе (правило миграций в CLAUDE.md). Сервис пользователей
+  при создании и правке: роль из списка; `division_id` есть ровно у `division_head`;
+  есть `login` или `telegram_id`; при `login` задан пароль. `access.For` повторно
+  отвергает неизвестную роль и руководителя без подразделения при каждом запросе.
 - Одна таблица на бота и сайт: заблокированный на сайте не должен читать отчёт в боте.
   Middleware бота (`UserAllowed`) переходит на `telegram_id AND blocked_at IS NULL`.
 - `is_admin` отдельно от роли и выдаётся любому: право редактировать пользователей и
   настройки не связано с глубиной отчёта. Bootstrap первого админа —
   `TELEGRAM_ADMIN_ID` для бота и одноразовая команда `cmd/api -create-admin` для сайта.
+- `is_admin` и `TELEGRAM_ADMIN_ID` не сливаются (решение 03.10.2026): оповещения парсера
+  получает **только** `TELEGRAM_ADMIN_ID`, один человек. Рассылка всем `is_admin`
+  требовала бы читать получателей из базы — о её падении узнать было бы некому.
 - Роль → последняя видимая строка, **включительно** — **константа в `internal/access`**,
   не таблица: это логика, а не данные (`division_head` → `1` + фильтр подразделения,
   `coo` → `4`, `cco` → `6`, `founder`/`cfo` → всё). Граница — по `sort` строки, а не
@@ -306,29 +311,19 @@ sessions (
 с каждой суммой в листе, только задаётся один раз с датами, а не в каждой ячейке.
 
 ```sql
-CREATE EXTENSION IF NOT EXISTS btree_gist;   -- для EXCLUDE по тексту и диапазону дат
-
 CREATE TABLE pnl_weekly_rules (
     id            SERIAL PRIMARY KEY,
-    -- Цель правила. '' = «любое значение». Пустая строка, а не NULL: EXCLUDE
-    -- сравнивает NULL как «разные», и два правила «на всё» пересеклись бы молча.
+    -- Цель правила. '' = «любое значение».
     division_name TEXT NOT NULL DEFAULT '',
-    item_name     TEXT NOT NULL CHECK (item_name <> ''),
+    item_name     TEXT NOT NULL,
     sub_item_name TEXT NOT NULL DEFAULT '',
-    method        TEXT NOT NULL CHECK (method IN ('month_prorate', 'calc')),
-    coef          NUMERIC(12,6),
-    valid         DATERANGE NOT NULL,          -- [с, по); открытый конец — действует сейчас
+    method        TEXT NOT NULL,               -- 'month_prorate' | 'calc'
+    coef          NUMERIC(12,6),               -- только у calc
+    valid_from    DATE NOT NULL,               -- включительно
+    valid_to      DATE,                        -- не включительно; NULL — действует сейчас
     comment       TEXT,
     updated_by    BIGINT REFERENCES users(id),
-    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-
-    CHECK ((method = 'calc') = (coef IS NOT NULL)),
-    -- Цель calc — ровно одна тройка: иначе одно вычисленное число
-    -- размножилось бы на все подходящие строки.
-    CHECK (method <> 'calc' OR (division_name <> '' AND sub_item_name <> '')),
-    CHECK (NOT lower_inf(valid) AND lower_inc(valid)),
-    -- Для одной цели в каждый день действует не больше одного правила.
-    EXCLUDE USING gist (division_name WITH =, item_name WITH =, sub_item_name WITH =, valid WITH &&)
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 -- Слагаемые базы для calc: coef × Σ(weight × сумма отбора за неделю).
@@ -336,17 +331,28 @@ CREATE TABLE pnl_weekly_rule_terms (
     id            SERIAL PRIMARY KEY,
     rule_id       INT NOT NULL REFERENCES pnl_weekly_rules(id) ON DELETE CASCADE,
     division_name TEXT NOT NULL DEFAULT '',
-    item_name     TEXT NOT NULL CHECK (item_name <> ''),
+    item_name     TEXT NOT NULL,
     sub_item_name TEXT NOT NULL DEFAULT '',
     weight        NUMERIC(12,6) NOT NULL DEFAULT 1
 );
 ```
 
-Имена — нормализованные (`lower(btrim())`, тем же CHECK, что в `pnl_item_map`) и
-по той же причине: правило на подстатью можно завести до её первой проводки.
+В базе — только ключи и `NOT NULL` (правило миграций в CLAUDE.md). Проверки правил —
+чистая функция в `internal/pnl`, вызывается при сохранении (400 со списком нарушений)
+и повторно при расчёте:
+- `item_name` не пуст; `method` — `month_prorate` или `calc`; `coef` есть ровно у `calc`;
+- цель `calc` — ровно одна тройка (подразделение и подстатья не `''`): иначе одно
+  вычисленное число размножилось бы на все подходящие строки;
+- `valid_to` позже `valid_from`;
+- **непересечение**: для одной цели в каждый день действует не больше одного правила.
+  Сохранение — в транзакции, которая сначала берёт `SELECT … FOR UPDATE` по правилам
+  цели: две одновременные правки иначе прошли бы проверку каждая по отдельности.
+
+Имена — нормализованные (`pnl.NormalizeItem`, как в `pnl_item_map`) и по той же
+причине: правило на подстатью можно завести до её первой проводки.
 
 **Смена правила не редактирует старое**, а закрывает его датой и заводит новое:
-`valid = [2026-01-01, 2026-08-03)` → `[2026-08-03, )`. Прошлые недели пересчитываются
+`[2026-01-01, 2026-08-03)` → `[2026-08-03, —)`. Прошлые недели пересчитываются
 по правилам, действовавшим тогда, и отчёт за март завтра не изменится оттого, что
 сегодня поменяли коэффициент. Правило недели выбирается по её первому дню.
 
@@ -364,9 +370,9 @@ CREATE TABLE pnl_weekly_rule_terms (
 3. Дальше как в месячном: раскладка по `pnl_item_map`, раскрытие, итоги, граница роли.
 
 **Цепочек нет**: отбор слагаемого не может пересекаться с целью `calc`-правила,
-действующего в пересекающиеся даты. SQL-ограничением это не выразить (отборы с `''`
-пересекаются по смыслу, а не по равенству), поэтому проверка в Go — при сохранении
-(400 со списком конфликтов) и повторно при расчёте: нарушение даёт ошибку, а не число.
+действующего в пересекающиеся даты (отборы с `''` пересекаются по смыслу, а не по
+равенству). Проверяется там же, где остальные правила: при сохранении и при расчёте —
+нарушение даёт ошибку, а не число.
 
 Начисление `type_oper 2` без правила ложится в неделю своей даты (1-е число) —
 отчёт показывает предупреждение, иначе месячная сумма молча уйдёт в первую неделю.
@@ -445,6 +451,11 @@ GET вместо `POST /api/pnl` из pnl-web.md: отчёт — чтение, �
 2. Миграция `000003`: `users` (новая форма), `sessions`, `pnl_lines`, `pnl_item_map` + сид.
 3. `internal/pnl` + `internal/access` — чистые функции, тесты на фикстурах.
 4. `cmd/api`: OpenAPI, вход, `/api/pnl`, `/api/me`; перевести бота на новую `users`.
+   **Сделано 03.10.2026**, плюс админские ручки пользователей. Отступления от §4:
+   правка пользователя — `PUT` целиком вместо `PATCH`; пароль — отдельной ручкой
+   `PUT /api/admin/users/{id}/password`; добавлен `GET /api/admin/divisions` для формы;
+   в `/api/me` — флаг `has_report`; сессии гасятся при блокировке и смене пароля
+   (роль и подразделение читаются на каждом запросе, гасить ради них незачем).
 5. SPA: вход, ОПиУ месячная, дашборд, админка пользователей.
 6. Детальные данные + выгрузка XLSX/PDF.
 7. Недельное ОПиУ: `period.Weeks` (пн–вс), двухшаговый расчёт в `internal/pnl`,

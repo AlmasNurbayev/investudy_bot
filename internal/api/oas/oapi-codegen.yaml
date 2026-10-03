@@ -1,0 +1,6 @@
+package: oas
+output: oas.gen.go
+generate:
+  models: true
+  fiber-v3-server: true
+  strict-server: true

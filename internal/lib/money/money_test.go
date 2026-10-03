@@ -95,3 +95,33 @@ func TestSumStaysExactOnLargeValues(t *testing.T) {
 		t.Errorf("Sum = %q, want %q", got, "299 999 999 999 999,97")
 	}
 }
+
+// Decimal уходит в JSON: точка, ровно два знака, знак минус, без разрядов.
+func TestDecimal(t *testing.T) {
+	cases := map[string]string{
+		"0":                 "0.00",
+		"45.5":              "45.50",
+		"-1234567.89":       "-1234567.89",
+		"99999999999999.99": "99999999999999.99",
+	}
+
+	for in, want := range cases {
+		if got := Decimal(num(t, in)); got != want {
+			t.Errorf("Decimal(%s) = %q, want %q", in, got, want)
+		}
+	}
+
+	if got := Decimal(pgtype.Numeric{}); got != "" {
+		t.Errorf("Decimal(NULL) = %q, want empty", got)
+	}
+}
+
+func TestAdd(t *testing.T) {
+	if got := Decimal(Add(num(t, "100.10"), num(t, "-0.15"))); got != "99.95" {
+		t.Errorf("Add = %q, want %q", got, "99.95")
+	}
+
+	if got := Decimal(Add(pgtype.Numeric{}, num(t, "1"))); got != "1.00" {
+		t.Errorf("Add(NULL, 1) = %q, want %q", got, "1.00")
+	}
+}

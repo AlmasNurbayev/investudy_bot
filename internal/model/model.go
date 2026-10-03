@@ -1,6 +1,8 @@
 package model
 
 import (
+	"time"
+
 	"github.com/guregu/null/v6"
 	"github.com/jackc/pgx/v5/pgtype"
 )
@@ -96,4 +98,45 @@ type ClosedReport struct {
 	Rows        []ReportRow
 	TotalDebet  pgtype.Numeric
 	TotalCredit pgtype.Numeric
+}
+
+// User — пользователь сайта и бота (таблица users).
+//
+// Хеша пароля здесь нет намеренно: структура уходит в ответы API и в логи,
+// и хеш, оказавшийся в ней, рано или поздно уехал бы наружу. Его отдаёт
+// только метод входа репозитория, отдельным значением.
+type User struct {
+	ID         int64
+	Login      null.String
+	TelegramID null.Int
+	Username   null.String
+	Role       string
+	// DivisionID и DivisionName — подразделение руководителя отдела.
+	DivisionID   null.Int
+	DivisionName null.String
+	IsAdmin      bool
+	HasPassword  bool
+	BlockedAt    null.Time
+	// LastSeenAt — последний запрос на сайте по любой из сессий.
+	LastSeenAt null.Time
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+}
+
+// UserInput — изменяемые поля пользователя: то, что заводит и правит
+// администратор. Пароль задаётся отдельно.
+type UserInput struct {
+	Login      null.String
+	TelegramID null.Int
+	Username   null.String
+	Role       string
+	DivisionID null.Int
+	IsAdmin    bool
+	Blocked    bool
+}
+
+// Ref — значение справочника: id и имя.
+type Ref struct {
+	ID   int32
+	Name string
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"investudy_bot/internal/config"
@@ -57,6 +58,10 @@ func (p *Pool) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, er
 
 func (p *Pool) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
 	return p.pool.QueryRow(ctx, sql, args...)
+}
+
+func (p *Pool) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	return p.pool.Exec(ctx, sql, args...)
 }
 
 // Begin открывает транзакцию: тем самым Pool подходит и на место repository.Beginner.

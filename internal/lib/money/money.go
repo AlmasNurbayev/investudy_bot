@@ -18,29 +18,54 @@ const nbsp = " "
 // десятичной арифметикой, и превращать результат в двоичную дробь ради вывода
 // значило бы вносить погрешность ровно там, где её уже не было.
 func Format(n pgtype.Numeric) string {
-	if !n.Valid {
+	sign, whole, frac, ok := digits(n)
+	if !ok {
 		return "—"
+	}
+
+	return sign + groups(whole) + "," + frac
+}
+
+// Decimal печатает NUMERIC десятичной строкой для JSON: «-1234567.89».
+//
+// Строкой, а не числом: NUMERIC(17,2) упирается в границу точности Number
+// в JavaScript, и сумма, прошедшая через JSON-число, могла бы потерять
+// копейки молча. Фронт форматирует строку сам и парсит её только для графиков.
+// NULL — пустая строка: «не считалось» не должно выглядеть нулём.
+func Decimal(n pgtype.Numeric) string {
+	sign, whole, frac, ok := digits(n)
+	if !ok {
+		return ""
+	}
+
+	return sign + whole + "." + frac
+}
+
+// digits раскладывает NUMERIC на знак, целую часть и ровно две цифры дроби.
+// ok = false для NULL и NaN.
+func digits(n pgtype.Numeric) (sign, whole, frac string, ok bool) {
+	if !n.Valid {
+		return "", "", "", false
 	}
 
 	// Строковое представление NUMERIC — единственный способ добраться до цифр,
 	// не потеряв масштаб: у Int/Exp он разъезжается на нулевых дробях.
 	buf, err := n.MarshalJSON()
 	if err != nil {
-		return "—"
+		return "", "", "", false
 	}
 
 	s := strings.Trim(string(buf), `"`)
 	if s == "null" || s == "NaN" {
-		return "—"
+		return "", "", "", false
 	}
 
-	sign := ""
 	if strings.HasPrefix(s, "-") {
 		sign, s = "-", s[1:]
 	}
 
-	whole, frac, ok := strings.Cut(s, ".")
-	if !ok {
+	whole, frac, found := strings.Cut(s, ".")
+	if !found {
 		frac = ""
 	}
 
@@ -48,9 +73,7 @@ func Format(n pgtype.Numeric) string {
 	// строки отчёта разъезжаются по ширине. Лишние знаки просто отсекаются —
 	// суммируются колонки NUMERIC(17,2), масштаб суммы тоже 2, так что резать
 	// тут нечего; округление понадобилось бы только на других данных.
-	frac = (frac + "00")[:2]
-
-	return sign + groups(whole) + "," + frac
+	return sign, whole, (frac + "00")[:2], true
 }
 
 // groups расставляет разделители разрядов справа налево.
@@ -100,6 +123,11 @@ func Sum(values []pgtype.Numeric) pgtype.Numeric {
 	}
 
 	return pgtype.Numeric{Int: total, Exp: exp, Valid: true}
+}
+
+// Add складывает две суммы точно — Sum для пары. NULL считается нулём.
+func Add(a, b pgtype.Numeric) pgtype.Numeric {
+	return Sum([]pgtype.Numeric{a, b})
 }
 
 func pow10(n int32) *big.Int {

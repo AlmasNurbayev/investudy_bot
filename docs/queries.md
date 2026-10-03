@@ -56,17 +56,48 @@ ORDER BY d.date, d.id;
 Telegram-id узнаётся из логов бота: отказ пишется как `access denied user=<id>`,
 то есть достаточно попросить человека отправить боту любую команду.
 
+Таблица `users` общая с сайтом (миграция `000003`), поэтому у записи обязательна
+роль — она задаёт, до какой строки ОПиУ человек видит отчёт: `division_head`
+(руководитель отдела, нужен `division_id`), `coo`, `cco`, `founder`, `cfo`.
+Отзыв — блокировкой, а не удалением: кто и когда имел доступ, остаётся видно,
+и блокировка закрывает и бота, и сайт.
+
 ```sql
 -- выдать доступ
-INSERT INTO users (telegram_id, username)
-VALUES (123456789, 'almas')
-ON CONFLICT (telegram_id) DO UPDATE SET username = EXCLUDED.username;
+INSERT INTO users (telegram_id, username, role)
+VALUES (123456789, 'almas', 'cfo')
+ON CONFLICT (telegram_id) DO UPDATE
+SET username = EXCLUDED.username, role = EXCLUDED.role, blocked_at = NULL, updated_at = now();
 
--- отозвать
-DELETE FROM users WHERE telegram_id = 123456789;
+-- руководителю отдела — ещё и подразделение
+INSERT INTO users (telegram_id, username, role, division_id)
+VALUES (123456789, 'almas', 'division_head', (SELECT id FROM divisions WHERE name = 'отдел продаж'));
+
+-- отозвать (сессии сайта гасятся вместе с доступом)
+UPDATE users SET blocked_at = now(), updated_at = now() WHERE telegram_id = 123456789;
+DELETE FROM sessions WHERE user_id = (SELECT id FROM users WHERE telegram_id = 123456789);
 
 -- кто имеет доступ
-SELECT telegram_id, username, role, created_at FROM users ORDER BY created_at;
+SELECT id, telegram_id, login, username, role, division_id, is_admin, blocked_at, created_at
+FROM users ORDER BY created_at;
+```
+
+## Структура ОПиУ
+
+Строки отчёта — `pnl_lines`, разметка статей — `pnl_item_map` (`line_id NULL` —
+статья исключена намеренно). Статья, которой нет в разметке, в отчёт не входит
+и показывается администратору как неразмеченная.
+
+```sql
+-- неразмеченные статьи рабочего среза
+SELECT DISTINCT it.name
+FROM data d JOIN items it ON it.id = d.item_id
+WHERE d.snapshot_id = (SELECT max(id) FROM snapshots)
+  AND lower(btrim(it.name)) NOT IN (SELECT item_name FROM pnl_item_map);
+
+-- разметить статью (имя — строчными, без пробелов по краям)
+INSERT INTO pnl_item_map (item_name, line_id)
+VALUES ('новая статья', (SELECT id FROM pnl_lines WHERE code = '5.1'));
 ```
 
 ## Настройки отчётов

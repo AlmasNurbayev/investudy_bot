@@ -7,15 +7,19 @@ package report
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"investudy_bot/internal/access"
 	"investudy_bot/internal/lib/money"
 	"investudy_bot/internal/lib/period"
 	"investudy_bot/internal/lib/snapshot"
 	"investudy_bot/internal/model"
+	"investudy_bot/internal/pnl"
+	"investudy_bot/internal/repository"
 )
 
 // snapshotCandidates — сколько свежих версий просматривать в поисках непустой.
@@ -29,8 +33,11 @@ const snapshotCandidates = 10
 // конкретную реализацию передаёт конструктор.
 type Reader interface {
 	ListSnapshots(ctx context.Context, limit int) ([]model.Snapshot, error)
+	SnapshotByID(ctx context.Context, id int64) (model.Snapshot, error)
 	ClosedReportsSettings(ctx context.Context) (model.ClosedReportsSettings, error)
 	ClosedReport(ctx context.Context, snapshotID int64, from, to time.Time, excluded []string) ([]model.ReportRow, error)
+	PnlStructure(ctx context.Context) (pnl.Structure, error)
+	PnlFacts(ctx context.Context, snapshotID int64, cols []period.Range, divisionID int32) ([]pnl.Fact, error)
 }
 
 type Service struct {
@@ -104,4 +111,93 @@ func column(rows []model.ReportRow, pick func(model.ReportRow) pgtype.Numeric) [
 	}
 
 	return out
+}
+
+// Snapshots — свежие версии для селектора и рабочая из них.
+func (s *Service) Snapshots(ctx context.Context, limit int) ([]model.Snapshot, model.Snapshot, error) {
+	snapshots, err := s.reader.ListSnapshots(ctx, limit)
+	if err != nil {
+		return nil, model.Snapshot{}, err
+	}
+
+	current, err := snapshot.Latest(snapshots)
+	if err != nil && !errors.Is(err, snapshot.ErrNoSnapshot) {
+		return nil, model.Snapshot{}, err
+	}
+
+	return snapshots, current, nil
+}
+
+// ErrSnapshotNotFound — запрошенной версии нет или она пустая.
+var ErrSnapshotNotFound = errors.New("версия среза не найдена или пуста")
+
+// PnL — ОПиУ для читателя с политикой policy.
+type PnL struct {
+	Snapshot model.Snapshot
+	// Stale — показан не новейший срез: последняя загрузка пустая или
+	// читатель выбрал старую версию сам.
+	Stale   bool
+	Columns []period.Column
+	Report  pnl.Report
+}
+
+// PnL считает ОПиУ по колонкам. snapshotID = 0 — рабочая версия.
+//
+// Граница строк и подразделение берутся только из политики: обработчик
+// не может «забыть» её применить, потому что других входов здесь нет.
+// Неразмеченные статьи отдаются всегда — показывать ли их суммы, решает
+// политика (ShowUnmapped) на выходе, а флаг неполноты нужен всем.
+func (s *Service) PnL(
+	ctx context.Context, policy access.Policy, snapshotID int64, cols []period.Column,
+) (PnL, error) {
+	newest, err := s.reader.ListSnapshots(ctx, snapshotCandidates)
+	if err != nil {
+		return PnL{}, err
+	}
+
+	var current model.Snapshot
+	if snapshotID == 0 {
+		if current, err = snapshot.Latest(newest); err != nil {
+			return PnL{}, err
+		}
+	} else {
+		if current, err = s.reader.SnapshotByID(ctx, snapshotID); err != nil {
+			if errors.Is(err, repository.ErrNotFound) {
+				return PnL{}, ErrSnapshotNotFound
+			}
+
+			return PnL{}, err
+		}
+
+		if !snapshot.Usable(current) {
+			return PnL{}, ErrSnapshotNotFound
+		}
+	}
+
+	structure, err := s.reader.PnlStructure(ctx)
+	if err != nil {
+		return PnL{}, err
+	}
+
+	ranges := make([]period.Range, len(cols))
+	for i, c := range cols {
+		ranges[i] = c.Range
+	}
+
+	facts, err := s.reader.PnlFacts(ctx, current.ID, ranges, policy.DivisionID)
+	if err != nil {
+		return PnL{}, err
+	}
+
+	rep, err := pnl.Build(structure, len(cols), facts, policy.LastLine)
+	if err != nil {
+		return PnL{}, err
+	}
+
+	return PnL{
+		Snapshot: current,
+		Stale:    len(newest) > 0 && newest[0].ID != current.ID,
+		Columns:  cols,
+		Report:   rep,
+	}, nil
 }

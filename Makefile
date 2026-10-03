@@ -38,6 +38,21 @@ dev-parser: ## один прогон парсера (загрузка среза
 dev-bot: ## запустить бота локально (демон, до Ctrl+C)
 	TZ=Asia/Almaty go run ./cmd/bot
 
+.PHONY: dev-api
+# API_COOKIE_SECURE=false — только здесь: локально API слушает http, а
+# Secure-cookie браузер по http не вернёт, и вход «не держался» бы.
+dev-api: ## запустить REST API локально (демон, до Ctrl+C)
+	TZ=Asia/Almaty API_COOKIE_SECURE=false go run ./cmd/api
+
+.PHONY: create-admin
+create-admin: ## завести администратора сайта (LOGIN=..., пароль спросит)
+	@test -n "$(LOGIN)" || { echo "make create-admin LOGIN=almas"; exit 1; }
+	go run ./cmd/api -create-admin -login $(LOGIN)
+
+.PHONY: generate
+generate: ## перегенерировать сервер из api/openapi.yaml
+	go generate ./internal/api/oas/
+
 .PHONY: migrate-up
 migrate-up: ## накатить миграции
 	go run ./cmd/migrator -typeTask up
@@ -76,7 +91,9 @@ test-integration: ## тесты с БД; нужен TEST_DATABASE_URL
 		echo ""; \
 		echo "  make test-integration TEST_DATABASE_URL=postgres://user:pass@localhost:5432/db"; \
 		exit 1; }
-	TEST_DATABASE_URL='$(TEST_DATABASE_URL)' go test ./internal/repository/
+	@# -p 1: оба пакета начинают с TRUNCATE одной базы и параллельно
+	@# стирали бы данные друг друга посреди теста.
+	TEST_DATABASE_URL='$(TEST_DATABASE_URL)' go test -p 1 -count=1 ./internal/repository/ ./internal/api/
 
 .PHONY: lint
 lint: ## golangci-lint

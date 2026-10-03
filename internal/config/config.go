@@ -58,6 +58,9 @@ func (c SheetsConfig) validate() error {
 // TelegramConfig — доступы бота. Парсеру они нужны не для чтения апдейтов,
 // а чтобы сообщить администратору о неудачной загрузке.
 //
+// Получатель оповещений — ровно один, AdminID, а не все users.is_admin:
+// список из базы не прочитать, когда упала сама база.
+//
 // Обе переменные обязательные, и намеренно: молча загружать данные, не имея
 // канала для жалобы, хуже, чем не стартовать вовсе — о падениях тогда никто
 // не узнает до первого расхождения в отчёте.
@@ -152,6 +155,31 @@ func LoadBot() (BotConfig, error) {
 
 	if err := env.Parse(&cfg); err != nil {
 		return BotConfig{}, err
+	}
+
+	return cfg, nil
+}
+
+// APIConfig — настройки REST API. Доступов к Google Sheets и Telegram нет:
+// API только читает отчёты и правит пользователей.
+type APIConfig struct {
+	Postgres PostgresConfig
+
+	// Addr — адрес, который слушает API; снаружи его закрывает nginx.
+	Addr string `env:"API_ADDR" envDefault:":8080"`
+
+	// CookieSecure — флаг Secure у cookie сессии. Выключать только для
+	// локального запуска по http: в бою сайт за TLS, и cookie без Secure
+	// ушла бы открытым текстом при первом же http-запросе.
+	CookieSecure bool `env:"API_COOKIE_SECURE" envDefault:"true"`
+}
+
+// LoadAPI читает настройки API.
+func LoadAPI() (APIConfig, error) {
+	var cfg APIConfig
+
+	if err := env.Parse(&cfg); err != nil {
+		return APIConfig{}, err
 	}
 
 	return cfg, nil

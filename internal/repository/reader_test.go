@@ -22,7 +22,7 @@ func newReader(t *testing.T) (*repository.Reader, *repository.Store, *pgx.Conn) 
 
 	store, conn := newStore(t)
 
-	if _, err := conn.Exec(context.Background(), `TRUNCATE users`); err != nil {
+	if _, err := conn.Exec(context.Background(), `TRUNCATE users CASCADE`); err != nil {
 		t.Fatalf("truncate users: %v", err)
 	}
 
@@ -281,11 +281,20 @@ func TestUserAllowed(t *testing.T) {
 		t.Error("посторонний пущен к финансовым данным")
 	}
 
-	if _, err = conn.Exec(ctx, `INSERT INTO users (telegram_id, username) VALUES (42, 'almas')`); err != nil {
+	if _, err = conn.Exec(ctx, `INSERT INTO users (telegram_id, username, role) VALUES (42, 'almas', 'cfo')`); err != nil {
 		t.Fatalf("insert user: %v", err)
 	}
 
 	if allowed, err = reader.UserAllowed(ctx, 42); err != nil || !allowed {
 		t.Errorf("выданный доступ не сработал: allowed=%v err=%v", allowed, err)
+	}
+
+	// Таблица общая с сайтом: заблокированный там не читает отчёт и в боте.
+	if _, err = conn.Exec(ctx, `UPDATE users SET blocked_at = now() WHERE telegram_id = 42`); err != nil {
+		t.Fatalf("block user: %v", err)
+	}
+
+	if allowed, err = reader.UserAllowed(ctx, 42); err != nil || allowed {
+		t.Errorf("заблокированный пущен к финансовым данным: allowed=%v err=%v", allowed, err)
 	}
 }
